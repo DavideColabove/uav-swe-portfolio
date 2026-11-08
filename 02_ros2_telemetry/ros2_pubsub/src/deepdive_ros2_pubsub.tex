@@ -1,0 +1,40 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+\usepackage{minted}
+
+\title{UAV Software Engineering: ROS 2 Architecture}
+\author{Advanced Pub/Sub, IPC, and Real-Time Determinism}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{The \texttt{rclcpp::Node} Abstraction and DDS Mapping}
+In ROS 2, every functional component inherits from \texttt{rclcpp::Node}. Under the hood, when you call \texttt{create\_publisher}, the \texttt{rclcpp} C++ library translates this request to the \texttt{rmw} (ROS Middleware) interface, which maps it to a DDS \textbf{DataWriter}. Conversely, \texttt{create\_subscription} maps to a DDS \textbf{DataReader}. 
+
+\section{Zero-Copy and Intra-Process Communication (IPC)}
+A naive implementation publishes messages by value (\texttt{publish(msg)}), forcing the DDS middleware to serialize the object into a byte stream (CDR) and send it over the loopback network. 
+For high-bandwidth sensors (4K Cameras, LiDAR) residing in the same physical process, ROS 2 provides \textbf{Intra-Process Communication (IPC)}. By instantiating a message as a \texttt{std::unique\_ptr} and publishing it via \texttt{std::move()}, the middleware bypasses the network stack and transfers pointer ownership. This results in \textbf{Zero-Copy} message passing, eliminating CPU overhead and maintaining strict real-time latency.
+
+\section{The Executor Model and Callback Groups}
+The \textbf{Executor} is the engine that spins the node and orchestrates callbacks. To prevent slow callbacks (e.g., logging) from starving high-frequency control loops, ROS 2 uses \textbf{Callback Groups}:
+\begin{enumerate}
+    \item \textbf{Mutually Exclusive (\texttt{MutuallyExclusive}):} Callbacks cannot run in parallel. Crucial for protecting shared memory without aggressive \texttt{std::mutex} locking.
+    \item \textbf{Reentrant (\texttt{Reentrant}):} The executor can spawn multiple threads to execute the exact same callback concurrently if data arrives at high rates.
+\end{enumerate}
+
+\section{Wall Timers}
+Writing a blocking \texttt{while(true)} loop inside a node permanently blocks the Executor's thread. Background tasks must strictly use \textbf{Wall Timers} (\texttt{rclcpp::TimerBase}), allowing the Executor to fire the logic deterministically.
+
+\section{Real-Time Memory: Custom Allocators (Advanced)}
+In standard C++, instantiating a message with \texttt{new} or \texttt{make\_unique} uses the OS default allocator. This allocator is non-deterministic: finding a free block of memory in a fragmented heap takes a variable amount of time. In a 1000Hz UAV control loop, a sudden delay of 2ms due to a Page Fault causes a crash.
+ROS 2 is designed to support \textbf{Custom Allocators} (like TLSF - Two-Level Segregated Fit). A true real-time publisher pre-allocates a fixed pool of memory at startup. When publishing, it uses this custom allocator (passed via \texttt{rclcpp::PublisherOptions}) to guarantee $O(1)$ constant-time memory allocation, entirely bypassing the OS kernel during flight.
+
+\section{Bypassing the Executor: WaitSets (Advanced)}
+The ROS 2 Executor model carries intrinsic overhead due to mutexes, futures, and thread scheduling. For ultra-low latency flight controllers, relying on the Executor is often unacceptable.
+ROS 2 exposes the lower-level \textbf{\texttt{rclcpp::WaitSet}} API. Instead of letting the Executor invoke callbacks asynchronously, a WaitSet allows the main thread to synchronously block and wait for a specific set of Subscriptions or Timers to trigger. This completely eliminates context-switching and Executor overhead, providing bare-metal deterministic polling—the gold standard for hardware-in-the-loop (HITL) aviation software.
+
+\end{document}
