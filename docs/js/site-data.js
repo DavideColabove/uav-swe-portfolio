@@ -30,7 +30,7 @@ const SITE_DATA = {
       description: 'Memory management (Smart Pointers), concurrency (std::thread), and build systems for modern C++ in robotics.',
       status: 'completed',         // completed | in-progress | upcoming
       folder: '01_cpp_robotics',
-      branch: 'feature/cpp-fundamentals',
+      branch: 'main',
       summaryPdf: 'summaries/ch1_summary.pdf',
       deepdives: [
         {
@@ -67,7 +67,7 @@ const SITE_DATA = {
       description: 'DDS protocol, OOP patterns for nodes, workspace management with Colcon, and publisher/subscriber patterns.',
       status: 'in-progress',
       folder: '02_ros2_telemetry',
-      branch: 'feature/ros2-architecture',
+      branch: 'main',
       summaryPdf: 'summaries/ch2_summary.pdf',
       deepdives: [
         {
