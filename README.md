@@ -1,9 +1,9 @@
 # UAV Software Engineering Portfolio
 
-### Actions
+[![Portfolio Website](https://img.shields.io/badge/Deep--Dive_Docs-Visit_Site-38bdf8?style=for-the-badge&logo=github)](https://davidecolabove.github.io/uav-software-portfolio/)
 
 [![CMake Build](https://github.com/DavideColabove/uav-software-portfolio/actions/workflows/build.yml/badge.svg)](https://github.com/DavideColabove/uav-software-portfolio/actions/workflows/build.yml) [![Memory & Thread Safety](https://github.com/DavideColabove/uav-software-portfolio/actions/workflows/sanitizers.yml/badge.svg)](https://github.com/DavideColabove/uav-software-portfolio/actions/workflows/sanitizers.yml) 
-[![LaTeX Documentation](https://github.com/DavideColabove/uav-software-portfolio/actions/workflows/latex.yml/badge.svg)](https://github.com/DavideColabove/uav-software-portfolio/actions/workflows/latex.yml)
+[![LaTeX Documentation](https://github.com/DavideColabove/uav-software-portfolio/actions/workflows/latex.yml/badge.svg)](https://davidecolabove.github.io/uav-swe-portfolio/)
 
 
 ## About This Project

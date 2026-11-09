@@ -4,7 +4,7 @@
 \geometry{a4paper, margin=1in}
 \usepackage{minted}
 \usepackage{graphicx}
-\graphicspath{{../../../assets/img/}{assets/img/}}
+\graphicspath{{assets/img/}{../../../assets/img/}}
 
 \title{UAV Software Engineering: ROS 2 Architecture}
 \author{The DDS Protocol and Publish/Subscribe Pattern}
@@ -33,7 +33,6 @@ or scale subsystems (e.g., swapping a physical camera node with a SITL simulatio
     \centering
     \includegraphics[width=0.6\textwidth]{publisher_subscriber.png}
     \caption{Publish-Subscribe Architecture and access through Topic.}
-    \label{fig:nome-etichetta}
 \end{figure}
 
 \section{OMG Specification and DDS Vendors}
@@ -44,7 +43,7 @@ requirements (e.g., DO-178C for aerospace) without rewriting application logic.
 
 \section{Applicative Architecture: DCPS and Domains}
 Unlike message-centric protocols, DDS employs a \textbf{Data-Centric Publish-Subscribe (DCPS)} model. 
-It creates the illusion of a \textit{Global Data Space (GDS)}—a distributed, shared memory database. Publishers write updates to this space, 
+It creates the illusion of a \textit{Global Data Space (GDS)} which is a distributed, shared memory database. Publishers write updates to this space, 
 and subscribers read from it. 
 
 To isolate traffic on the same physical network (e.g., running a simulation on the same Wi-Fi as a real drone), 
@@ -55,8 +54,7 @@ Data structures are strictly defined using the \textbf{Interface Definition Lang
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=0.6\textwidth]{Data-centric-publish-subscribe-DCPS-model.png}
-    \caption{Publish-Subscribe Architecture and access through Topic.}
-    \label{fig:nome-etichetta}
+    \caption{DPCS model.}
 \end{figure}
 
 

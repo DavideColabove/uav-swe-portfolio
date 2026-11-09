@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UAV Software Portfolio - Davide Colabove</title>
+  <meta name="description" content="Deep-dive documentation for mastering UAV software engineering: C++, ROS 2, PX4, MAVSDK, Computer Vision.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+<body>
+
+  <!-- ═══════ NAVBAR ═══════ -->
+  <nav class="navbar">
+    <div class="container">
+      <a href="index.html" class="nav-brand">
+        <svg viewBox="0 0 24 24"><path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/></svg>
+        UAV Portfolio
+      </a>
+      <button class="nav-toggle" aria-label="Menu">☰</button>
+      <ul class="nav-links">
+        <li><a href="index.html" class="active">Home</a></li>
+        <li><a href="https://github.com/DavideColabove/uav-software-portfolio" target="_blank">GitHub ↗</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- ═══════ HERO ═══════ -->
+  <section class="hero">
+    <div class="container">
+      <div class="hero-badge">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+        Open Source Learning Path
+      </div>
+      <h1>UAV Software <span>Engineering</span></h1>
+      <p>
+        A 3-month intensive deep-dive into the full stack of autonomous drone software, from C++ memory management to precision AI landing, documented as LaTeX deep-dives with working C++ implementations.
+      </p>
+      <div class="hero-tech" id="tech-pills"></div>
+    </div>
+  </section>
+
+  <!-- ═══════ PROGRESS ═══════ -->
+  <section class="progress-section">
+    <div class="container">
+      <div class="progress-label">
+        <span>Roadmap Progress</span>
+        <span id="progress-pct"></span>
+      </div>
+      <div class="progress-bar-outer">
+        <div class="progress-bar-inner" id="progress-bar" style="width:0%"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════ CHAPTERS ═══════ -->
+  <section class="container">
+    <div class="section-title">
+      <h2>Deep-Dive Chapters</h2>
+      <p>Each chapter contains theoretical LaTeX deep-dives, a chapter summary, and working C++ source code.</p>
+    </div>
+    <div class="chapters-grid" id="chapters-grid"></div>
+  </section>
+
+  <!-- ═══════ FOOTER ═══════ -->
+  <footer class="site-footer">
+    <div class="container">
+      <p>Built by <a href="https://github.com/DavideColabove" target="_blank">Davide Colabove</a> · <a href="https://github.com/DavideColabove/uav-software-portfolio" target="_blank">Source on GitHub</a></p>
+    </div>
+  </footer>
+
+  <button class="back-to-top" aria-label="Back to top">↑</button>
+
+  <!-- Scripts -->
+  <script src="js/site-data.js"></script>
+  <script src="js/app.js"></script>
+  <script>
+    // Render tech pills
+    const pillsEl = document.getElementById('tech-pills');
+    SITE_DATA.techStack.forEach(t => {
+      const span = document.createElement('span');
+      span.className = 'tech-pill';
+      span.textContent = t;
+      pillsEl.appendChild(span);
+    });
+
+    // Render progress
+    const total = SITE_DATA.chapters.length;
+    const done = SITE_DATA.chapters.filter(c => c.status === 'completed').length;
+    const inProg = SITE_DATA.chapters.filter(c => c.status === 'in-progress').length;
+    const pct = Math.round(((done + inProg * 0.5) / total) * 100);
+    document.getElementById('progress-pct').textContent = `${pct}%`;
+    setTimeout(() => {
+      document.getElementById('progress-bar').style.width = pct + '%';
+    }, 200);
+
+    // Render chapter cards
+    const grid = document.getElementById('chapters-grid');
+    SITE_DATA.chapters.forEach((ch, i) => {
+      const card = document.createElement('a');
+      card.href = `chapter.html?ch=${ch.id}`;
+      card.className = 'chapter-card fade-in';
+      card.style.transitionDelay = `${i * 0.08}s`;
+
+      const statusLabel = ch.status === 'completed' ? 'Completed' :
+                          ch.status === 'in-progress' ? 'In Progress' : 'Upcoming';
+
+      card.innerHTML = `
+        <span class="card-number">Chapter ${ch.number}</span>
+        <h3>${ch.title}</h3>
+        <p>${ch.description}</p>
+        <div class="card-meta">
+          <span class="card-tag ${ch.status}">${statusLabel}</span>
+          <span class="card-deepdive-count">${ch.deepdives.length} deep-dive${ch.deepdives.length !== 1 ? 's' : ''}</span>
+        </div>
+      `;
+      grid.appendChild(card);
+    });
+
+    // Re-init fade-in for dynamically added elements
+    initFadeIn();
+  </script>
+</body>
+</html>

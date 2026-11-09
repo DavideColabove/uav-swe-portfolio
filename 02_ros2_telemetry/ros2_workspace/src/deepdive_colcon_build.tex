@@ -1,0 +1,112 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+\usepackage{minted}
+
+\title{UAV Software Engineering: ROS 2 Architecture}
+\author{Workspaces, Colcon, and Ament}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{The Concept of a Workspace}
+In standard C++ development, a project typically resides in a single directory with one root \texttt{CMakeLists.txt}. 
+In robotics, a UAV software stack is composed of dozens of independent packages (e.g., \texttt{camera\_driver}, \texttt{flight\_controller}, 
+\texttt{telemetry\_node}). 
+
+ROS 2 organizes these packages into a \textbf{Workspace}. A standard workspace contains three primary directories:
+\begin{itemize}
+    \item \texttt{src/}: The only directory you will manually edit. It contains the source code for all your individual packages.
+    \item \texttt{build/}: Where intermediate files (object files, CMake cache) are stored for each package.
+    \item \texttt{install/}: Where the final compiled executables, libraries, and configuration scripts are placed.
+\end{itemize}
+
+\section{Colcon: The Meta-Build System}
+To compile a workspace, ROS 2 uses \textbf{Colcon} (COLlective CONstruction). Instead of manually running \texttt{cmake} and \texttt{make} in each package, 
+you run \texttt{colcon build} at the root of the workspace. Colcon analyzes the dependency graph of all packages in the \texttt{src/} folder, 
+determines the correct build order, and invokes CMake for each one concurrently.
+
+\section{Package Anatomy: \texttt{package.xml} and \texttt{CMakeLists.txt}}
+For Colcon to recognize a folder inside \texttt{src/} as a ROS 2 package, it must contain two files:
+\begin{enumerate}
+    \item \textbf{\texttt{package.xml}:} An XML manifest defining the package's name, version, license, and its dependencies (e.g., \texttt{rclcpp}, 
+    \texttt{std\_msgs}). This is crucial for resolving dependencies before the build process begins.
+    \item \textbf{\texttt{CMakeLists.txt}:} The build script. However, ROS 2 extends standard CMake with the \textbf{\texttt{ament\_cmake}} macro ecosystem. 
+    Ament simplifies finding ROS 2 dependencies and installing the generated executables into the workspace's \texttt{install/} directory.
+\end{enumerate}
+
+\section{The Overlay Environment (\texttt{setup.bash})}
+Linux needs to know where to find your newly compiled UAV executables and libraries. 
+When Colcon finishes building, it generates a \texttt{setup.bash} file inside the \texttt{install/} directory. 
+
+By executing \texttt{source install/setup.bash}, you prepend your workspace's paths to your system's environment variables (like \texttt{PATH} and 
+\texttt{LD\_LIBRARY\_PATH}). This process creates an \textbf{Overlay} on top of the base ROS 2 installation (the \textit{Underlay}), allowing the terminal 
+to dynamically discover and run your custom drone nodes.
+
+\section{Advanced Colcon Strategies: Symlinks and Build Types}
+Building a massive UAV monorepo can take minutes or even hours. To optimize the development cycle, engineers rely on specific Colcon arguments:
+\begin{itemize}
+    \item \textbf{\texttt{--symlink-install}:} By default, Colcon copies files from \texttt{src/} to \texttt{install/}. 
+    If you modify a Python script, a launch file, or a YAML configuration, you are forced to rebuild. Using \texttt{--symlink-install} creates symbolic links 
+    instead of copying. This allows changes to interpreted scripts and config files to take effect immediately without recompiling the workspace.
+    \item \textbf{CMake Build Types:} By default, CMake compiles without heavy optimizations. In drone software, running unoptimized control loops can cause 
+    the CPU to miss real-time deadlines, leading to catastrophic crashes. It is mandatory to compile flight-ready nodes with hardware-specific 
+    optimizations using: \\
+    \texttt{colcon build --cmake-args -DCMAKE\_BUILD\_TYPE=Release}.
+\end{itemize}
+
+\section{The Power of \texttt{ament\_cmake} and Transitive Dependencies}
+Standard CMake requires developers to manually track and link every library and its dependencies 
+using \texttt{target\_link\_libraries} and \texttt{target\_include\_directories}. In a complex robotics stack, this becomes unmaintainable.
+
+ROS 2 solves this with \textbf{\texttt{ament\_cmake}}. When you use \texttt{ament\_target\_dependencies(my\_node rclcpp std\_msgs)}, 
+Ament automatically resolves all \textit{transitive dependencies} (the dependencies of your dependencies). 
+Furthermore, when you export your package using \texttt{ament\_export\_dependencies()}, any other node in the UAV stack that depends on your package will 
+automatically inherit the correct include paths and linked libraries, ensuring a modular and robust build graph.
+
+\section{Environment Chaining: Underlays and Overlays}
+Professional drone software stacks are often containerized (as we will see in Chapter 7). 
+Understanding how workspaces chain together is vital. 
+The system installation of ROS 2 (e.g., in \texttt{/opt/ros/humble}) is the \textbf{Underlay}. 
+When you source its \texttt{setup.bash}, your environment is populated with the base ROS 2 libraries.
+
+When you compile your custom \texttt{uav\_ws} and source its \texttt{setup.bash}, it becomes an \textbf{Overlay}. 
+The overlay intelligently prepends its paths to the environment without overwriting the underlay. 
+This allows you to have multiple layers of workspaces (e.g., a base ROS 2 underlay, a third-party driver middle-layer, and your custom flight controller overlay),
+enabling seamless integration of proprietary and open-source components.
+
+\section{Practical Workflow: Workspace Initialization}
+The following terminal commands represent the standard workflow to create a workspace, generate a package, and compile the overlay:
+
+\begin{minted}{bash}
+# 1. Create the workspace and the source directory
+mkdir -p uav_ws/src
+cd uav_ws/src
+
+# 2. Source the system Underlay to enable ROS 2 CLI tools
+# (Replace 'jazzy' with your specific ROS 2 distribution)
+source /opt/ros/jazzy/setup.bash
+
+# 3. Create a C++ package using ament_cmake
+ros2 pkg create --build-type ament_cmake dummy_uav_pkg
+
+# 4. Return to the workspace root and build using Colcon
+cd ..
+colcon build
+
+# 5. Source the newly built Overlay to make the package visible to Linux
+source install/setup.bash
+\end{minted}
+
+\section{Advanced Build Optimization}
+In production UAV environments, building can be optimized using:
+\begin{itemize}
+    \item \texttt{--symlink-install}: Creates symbolic links instead of copying files, allowing Python scripts and config files to update immediately without recompiling.
+    \item \texttt{Release Mode}: Drone software must meet hard real-time deadlines. Compile with hardware optimizations using: \\
+    \texttt{colcon build --cmake-args -DCMAKE\_BUILD\_TYPE=Release}.
+\end{itemize}
+
+\end{document}
