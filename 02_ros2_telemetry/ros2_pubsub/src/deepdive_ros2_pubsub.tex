@@ -15,6 +15,10 @@
 \section{The \texttt{rclcpp::Node} Abstraction and DDS Mapping}
 In ROS 2, every functional component inherits from \texttt{rclcpp::Node}. Under the hood, when you call \texttt{create\_publisher}, the \texttt{rclcpp} C++ library translates this request to the \texttt{rmw} (ROS Middleware) interface, which maps it to a DDS \textbf{DataWriter}. Conversely, \texttt{create\_subscription} maps to a DDS \textbf{DataReader}. 
 
+\section{Publishers, Topics, and Message Types}
+A Publisher is an entity responsible for broadcasting data to the ROS 2 network. Instead of sending data to a specific IP address, it publishes to a named channel called a \textbf{Topic} (e.g., \texttt{/uav/sensors/gps}). 
+The data sent over a topic must adhere to a strict structural definition called a Message Type. While standard ROS 2 provides simple types like \texttt{std\_msgs::msg::String}, UAVs heavily rely on \texttt{sensor\_msgs::msg::NavSatFix} for transmitting GPS coordinates.
+
 \section{Zero-Copy and Intra-Process Communication (IPC)}
 A naive implementation publishes messages by value (\texttt{publish(msg)}), forcing the DDS middleware to serialize the object into a byte stream (CDR) and send it over the loopback network. 
 For high-bandwidth sensors (4K Cameras, LiDAR) residing in the same physical process, ROS 2 provides \textbf{Intra-Process Communication (IPC)}. By instantiating a message as a \texttt{std::unique\_ptr} and publishing it via \texttt{std::move()}, the middleware bypasses the network stack and transfers pointer ownership. This results in \textbf{Zero-Copy} message passing, eliminating CPU overhead and maintaining strict real-time latency.
@@ -26,8 +30,14 @@ The \textbf{Executor} is the engine that spins the node and orchestrates callbac
     \item \textbf{Reentrant (\texttt{Reentrant}):} The executor can spawn multiple threads to execute the exact same callback concurrently if data arrives at high rates.
 \end{enumerate}
 
-\section{Wall Timers}
+\section{Wall Timers and Callback Binding}
 Writing a blocking \texttt{while(true)} loop inside a node permanently blocks the Executor's thread. Background tasks must strictly use \textbf{Wall Timers} (\texttt{rclcpp::TimerBase}), allowing the Executor to fire the logic deterministically.
+
+When registering a timer callback within an Object-Oriented architecture, the Executor needs to know exactly which object instance the method belongs to. You cannot simply pass a method name. There are two ways to bind a member function to the timer:
+\begin{itemize}
+    \item \textbf{\texttt{std::bind} (Legacy):} \texttt{std::bind(\&MyNode::callback, this)} creates a callable wrapper by explicitly binding the member function pointer to the current object instance (\texttt{this}). While common in older ROS 2 tutorials, it is less efficient.
+    \item \textbf{Lambda Expressions (Modern C++):} The industry standard is to use an anonymous lambda function: \texttt{[this]() \{ this->callback(); \}}. The lambda must capture \texttt{[this]} in its capture clause. Without it, the lambda is isolated and cannot access the node's private members (like publishers or state variables). Capturing \texttt{[this]} grants the lambda full access to the object's scope, offering cleaner syntax and superior compiler optimization.
+\end{itemize}
 
 \section{Real-Time Memory: Custom Allocators (Advanced)}
 In standard C++, instantiating a message with \texttt{new} or \texttt{make\_unique} uses the OS default allocator. This allocator is non-deterministic: finding a free block of memory in a fragmented heap takes a variable amount of time. In a 1000Hz UAV control loop, a sudden delay of 2ms due to a Page Fault causes a crash.
@@ -37,4 +47,67 @@ ROS 2 is designed to support \textbf{Custom Allocators} (like TLSF - Two-Level S
 The ROS 2 Executor model carries intrinsic overhead due to mutexes, futures, and thread scheduling. For ultra-low latency flight controllers, relying on the Executor is often unacceptable.
 ROS 2 exposes the lower-level \textbf{\texttt{rclcpp::WaitSet}} API. Instead of letting the Executor invoke callbacks asynchronously, a WaitSet allows the main thread to synchronously block and wait for a specific set of Subscriptions or Timers to trigger. This completely eliminates context-switching and Executor overhead, providing bare-metal deterministic polling—the gold standard for hardware-in-the-loop (HITL) aviation software.
 
+\section{ROS 2 Components: Moving from Monolithic Executables to Shared Libraries}
+In a professional production environment, compiling every node into a standalone monolithic executable is an anti-pattern. If multiple nodes reside in separate binaries, modifying one requires rebuilding and replacing multiple independent binaries, and it introduces architectural friction. 
+
+Industry-grade ROS 2 systems leverage \textbf{ROS 2 Components}. Instead of writing a standard \texttt{main()} function, a node is written as a self-contained C++ class inheriting from \texttt{rclcpp::Node} and compiled as a shared library (\texttt{.so} file on Linux). 
+
+\subsection{Key Code Modifications for Components}
+To transform a traditional node into a loadable component, three core code changes are required:
+\begin{enumerate}
+    \item \textbf{Header Inclusion:} Include the component registration macro header:
+\begin{minted}{cpp}
+#include "rclcpp_components/register_node_macro.hpp"
+\end{minted}
+    \item \textbf{Constructor Signature:} The constructor must accept \texttt{const rclcpp::NodeOptions \& options} and forward it to the base class constructor. This is mandatory so the container can inject runtime configurations (such as enabling Intra-Process Communication):
+\begin{minted}{cpp}
+explicit GpsPublisher(const rclcpp::NodeOptions & options) 
+    : Node("gps_sensor_node", options) { ... }
+\end{minted}
+    \item \textbf{Component Registration Macro:} Remove the \texttt{int main()} function entirely. At the bottom of the translation unit, register the class as a plugin using the framework's macro:
+\begin{minted}{cpp}
+RCLCPP_COMPONENTS_REGISTER_NODE(GpsPublisher)
+\end{minted}
+\end{enumerate}
+
+\section{The Component Container and Dynamic Deployment}
+Once compiled as a shared library (\texttt{libgps\_component.so}), the component is loaded at runtime into a \textbf{Component Container} (a lightweight management process). 
+
+The container instantiates a \texttt{ComponentManager} which uses the operating system's dynamic loader (\texttt{dlopen}) to open the shared library and instantiate the node inside its own memory space. By loading multiple components (e.g., the GPS sensor and the Flight Controller) into the exact same container process, ROS 2 enables true Zero-Copy IPC: messages passed via \texttt{std::unique\_ptr} bypass the network stack entirely, achieving $O(1)$ pointer transfer latency.
+
+\section{Deployment Cheatsheet: Build and Execution}
+To build and deploy component-based ROS 2 packages using \texttt{colcon} and the command-line interface, follow this operational workflow:
+
+\begin{enumerate}
+\item \textbf{Clean build workspace:}
+\begin{minted}{bash}
+rm -rf build/ install/ log/
+colcon build --packages-select uav_gps
+\end{minted}
+\item \textbf{Source the workspace overlay:}
+\begin{minted}{bash}
+source install/setup.bash
+\end{minted}
+\item \textbf{Launch the Component Container (Terminal 1):}
+\begin{minted}{bash}
+ros2 run rclcpp_components component_container
+\end{minted}
+\item \textbf{Dynamically load the component into the container (Terminal 2):}
+\begin{minted}{bash}
+source install/setup.bash
+ros2 component load /ComponentManager uav_gps GpsPublisher
+\end{minted}
+\end{enumerate}
+
+\section{System Demonstration and Architecture Verification}
+To empirically prove that the nodes are running within the same process and leveraging Zero-Copy IPC, a three-terminal orchestration model is used:
+\begin{itemize}
+    \item \textbf{Terminal 1 (The Shared Container):} Hosts the \texttt{component\_container} process. This serves as the unified runtime memory space where multiple node plugins are injected dynamically.
+    \item \textbf{Terminal 2 (The Component Loader):} Issues the runtime command to inject the \texttt{GpsPublisher} shared library into the container via ROS 2 services.
+    \item \textbf{Terminal 3 (The Flight Controller Subscriber):} Runs the standard executable node \texttt{flight\_node} which subscribes to the telemetry topic, verifying message flow across nodes.
+\end{itemize}
+
+Verification can be performed using ROS 2 introspection tools. Executing \texttt{ros2 node list} displays both nodes, while \texttt{ros2 topic info -v /uav/sensors/gps} confirms the underlying middleware transport efficiency and publisher-subscriber topology.
+
 \end{document}
+   
