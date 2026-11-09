@@ -1,0 +1,138 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+\usepackage{minted}
+
+\title{UAV Software Engineering: ROS 2 Architecture}
+\author{Custom Interfaces, QoS, and Flight-Critical Orchestration}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction to Custom Interfaces (IDL)}
+In standard software development, passing data between functions is handled via memory pointers or pass-by-value structs. 
+In a distributed UAV architecture, nodes may be running on different CPU cores, different Docker containers, or entirely different physical 
+hardware (e.g., a Companion Computer talking to a Ground Control Station). 
+
+ROS 2 solves this distributed data serialization problem using an Interface Definition Language (IDL). 
+Rather than writing raw C++ structs, developers define message schemas in language-agnostic \texttt{.msg} or \texttt{.srv} files. 
+During the \texttt{colcon build} process, a code generator (specifically \texttt{rosidl\_default\_generators}) 
+translates these schemas into highly optimized C++, Python, and DDS-specific IDL data structures.
+
+\section{Designing a UAV Telemetry Message}
+While ROS 2 provides standard types (e.g., \texttt{sensor\_msgs/msg/NavSatFix}), specialized drone operations 
+often require custom telemetry payloads that pack multiple data points into a single, bandwidth-efficient packet.
+
+Consider the following definition for \texttt{DroneTelemetry.msg}:
+\begin{minted}{yaml}
+std_msgs/Header header
+float64 latitude
+float64 longitude
+float32 altitude_amsl_m
+float32 battery_voltage_v
+uint8 flight_mode
+bool is_armed
+\end{minted}
+
+When a C++ node publishes this custom message, the ROS 2 middleware (RMW) serializes the object into a Common Data Representation (CDR) 
+byte stream. CDR handles Endianness automatically, ensuring that a Ground Control Station on an x86\_64 Windows machine can seamlessly decode 
+a packet sent by an ARM64 companion computer on the drone.
+
+\section{DDS Quality of Service (QoS): The Aerospace Lifeline}
+The most significant architectural upgrade from ROS 1 to ROS 2 is the underlying Data Distribution Service (DDS) middleware. 
+Standard TCP/IP networking guarantees delivery but suffers from unbounded latency and head-of-line blocking---both unacceptable in real-time flight
+ control. DDS operates over UDP, providing deterministic, tunable communication through \textbf{Quality of Service (QoS)} policies.
+
+In UAV engineering, especially when operating over lossy Radio Frequency (RF) datalinks, tuning QoS is a regulatory necessity.
+
+\subsection{Reliability Policy}
+The Reliability policy dictates whether the middleware guarantees packet delivery.
+\begin{itemize}
+    \item \textbf{\texttt{RELIABLE}:} The middleware mandates acknowledgment (ACK) from the subscriber. If a packet is lost, a NACK is sent, and the publisher retransmits it. 
+    \textit{Aerospace Use Case:} Critical commands such as "Arm Motors", "Deploy Parachute", or "Upload Waypoint Mission". Missing these packets is catastrophic.
+    \item \textbf{\texttt{BEST\_EFFORT}:} The middleware sends the packet once (fire-and-forget). No ACKs are tracked, saving immense network overhead. 
+    \textit{Aerospace Use Case:} High-frequency sensor streams (e.g., 100Hz IMU). If a quadcopter misses a 10-millisecond-old IMU reading, retransmitting it is worse than useless, as the drone has already rotated. It is better to process the next fresh packet immediately.
+\end{itemize}
+
+\subsection{Durability Policy}
+Durability determines how the middleware handles "late joiners"---nodes that subscribe to a topic after the publisher has already started sending data.
+\begin{itemize}
+    \item \textbf{\texttt{VOLATILE}:} Messages are not saved. A late subscriber only sees messages published \textit{after} it connects.
+    \item \textbf{\texttt{TRANSIENT\_LOCAL}:} The publisher keeps a history of the most recent messages and immediately fires them to any new subscriber that joins the graph.
+    \textit{Aerospace Use Case:} The "Flight Mode" state (e.g., \texttt{STABILIZED}, \texttt{AUTO}). If a Ground Station reconnects mid-flight, it must instantly know the current mode, rather than waiting for the drone to manually broadcast it again.
+\end{itemize}
+
+\section{Advanced QoS: Deadlines and Liveliness (Failsafe Triggers)}
+Modern UAV architectures leverage advanced DDS features to build inherent safety mechanisms directly into the middleware, 
+circumventing the need for custom "watchdog" threads.
+
+\subsection{Deadline and Liveliness Policies}
+The \texttt{DEADLINE} policy enforces a strict contract: a publisher promises to send a message at least once every $T$ milliseconds. 
+If the publisher fails to meet this deadline (due to a software crash or network loss), ROS 2 automatically fires a 
+\texttt{RequestedDeadlineMissed} callback on the subscriber. The flight controller can use this hardware-level trigger to instantly engage 
+Return-To-Launch (RTL).
+
+Similarly, the \texttt{LIVELINESS} policy monitors the heartbeat of a node. 
+Using \texttt{MANUAL\_BY\_TOPIC}, the publisher must explicitly assert its liveliness, proving not just that the process is running, 
+but that the specific sensor loop hasn't deadlocked.
+
+\section{DO-178C Inspired Lifecycle Management}
+Standard ROS 2 nodes begin executing their internal logic immediately upon instantiation. 
+In mission-critical UAV operations (e.g., pre-arm checks, sensor calibration), unmanaged initialization introduces unpredictable race conditions. 
+
+To mitigate this, industrial robotics relies on the \textbf{Lifecycle Node} model (\texttt{rclcpp\_lifecycle::LifecycleNode}),
+mirroring finite state machine (FSM) paradigms required for DO-178C compliant aviation software:
+\begin{enumerate}
+    \item \textbf{Unconfigured:} The node is instantiated, but hardware interfaces are dormant.
+    \item \textbf{Inactive (Configured):} Memory is allocated via \texttt{on\_configure()}. Publishers exist but are muted (network transmission disabled).
+    \item \textbf{Active:} Triggered via \texttt{on\_activate()}, timers begin firing and telemetry data is actively transmitted.
+    \item \textbf{Finalized:} Graceful teardown via \texttt{on\_cleanup()} and \texttt{on\_shutdown()}.
+\end{enumerate}
+This architecture allows a central "Mission Supervisor" node to configure all UAV subsystems, verify sensor integrity, 
+and only issue the activate command when the entire stack is healthy.
+
+\section{Real-Time Execution: PREEMPT\_RT}
+While Zero-Copy IPC solves memory bottlenecks, CPU scheduling remains a challenge. 
+A standard Linux kernel uses completely fair scheduling (CFS), which balances fairness over determinism. 
+For a 400Hz quadcopter PID loop, a scheduling jitter of 3 milliseconds can destabilize the aircraft.
+
+To achieve hard real-time execution in ROS 2:
+\begin{itemize}
+    \item \textbf{PREEMPT\_RT Kernel:} The OS must be patched, making spinlocks preemptible and eliminating bounded priority inversion.
+    \item \textbf{Memory Locking:} Page faults must be prevented using memory locking (\texttt{mlockall}) to lock the node's memory into physical RAM, bypassing the OS swap disk.
+    \item \textbf{Thread Priorities (\texttt{SCHED\_FIFO}):} The ROS 2 Executor thread running the flight controller must be elevated to a real-time POSIX priority, ensuring it preempts all other OS background tasks the microsecond a timer triggers.
+\end{itemize}
+
+\section{Implementation in Modern C++}
+When instantiating a publisher in C++, QoS profiles are passed via the \texttt{rclcpp::QoS} class. 
+A production-grade sensor node configures its profile explicitly:
+
+\begin{minted}{cpp}
+#include "rclcpp/rclcpp.hpp"
+#include "uav_interfaces/msg/drone_telemetry.hpp"
+
+class TelemetryNode : public rclcpp::Node {
+public:
+    TelemetryNode() : Node("telemetry_node") {
+        // Construct a highly-specific QoS profile for RF telemetry
+        rclcpp::QoS telemetry_qos_profile(10); // Keep_last with depth 10
+        telemetry_qos_profile.best_effort();
+        telemetry_qos_profile.durability_volatile();
+        telemetry_qos_profile.deadline(std::chrono::milliseconds(500));
+
+        publisher_ = this->create_publisher<uav_interfaces::msg::DroneTelemetry>(
+            "/uav/telemetry", 
+            telemetry_qos_profile
+        );
+    }
+private:
+    rclcpp::Publisher<uav_interfaces::msg::DroneTelemetry>::SharedPtr publisher_;
+};
+\end{minted}
+
+Mastering Custom Interfaces, Lifecycle orchestration, and QoS is what separates hobbyist robotics from aviation-grade software engineering.
+
+\end{document}
