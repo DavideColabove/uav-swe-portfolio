@@ -4,6 +4,7 @@
 \geometry{a4paper, margin=1in}
 \usepackage{minted}
 \usepackage{graphicx}
+\graphicspath{{assets/img/}{../../../assets/img/}}
 
 \title{UAV Software Engineering: ROS 2 Architecture}
 \author{The DDS Protocol and Publish/Subscribe Pattern}
@@ -30,9 +31,8 @@ or scale subsystems (e.g., swapping a physical camera node with a SITL simulatio
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.6\textwidth]{../../../assets/img/publisher_subscriber.png}
+    \includegraphics[width=0.6\textwidth]{publisher_subscriber.png}
     \caption{Publish-Subscribe Architecture and access through Topic.}
-    \label{fig:nome-etichetta}
 \end{figure}
 
 \section{OMG Specification and DDS Vendors}
@@ -53,9 +53,8 @@ Data structures are strictly defined using the \textbf{Interface Definition Lang
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.6\textwidth]{../../../assets/img/Data-centric-publish-subscribe-DCPS-model.png}
-    \caption{Publish-Subscribe Architecture and access through Topic.}
-    \label{fig:nome-etichetta}
+    \includegraphics[width=0.6\textwidth]{Data-centric-publish-subscribe-DCPS-model.png}
+    \caption{DPCS model.}
 \end{figure}
 
 
