@@ -65,7 +65,7 @@ const SITE_DATA = {
       title: 'ROS 2 Architecture & Middleware',
       shortTitle: 'ROS 2 Architecture',
       description: 'DDS protocol, OOP patterns for nodes, workspace management with Colcon, and publisher/subscriber patterns.',
-      status: 'in-progress',
+      status: 'completed',
       folder: '02_ros2_telemetry',
       branch: 'main',
       summaryPdf: 'summaries/ch2_summary.pdf',
@@ -93,6 +93,12 @@ const SITE_DATA = {
           subtitle: 'rclcpp::Node, timers, message callbacks',
           pdfPath: '02_ros2_telemetry/ros2_pubsub/out/deepdive_ros2_pubsub.pdf',
           texPath: '02_ros2_telemetry/ros2_pubsub/src/deepdive_ros2_pubsub.tex',
+        },
+        {
+          title: 'Custom Interfaces and QoS',
+          subtitle: 'QoS for lossy drone networks, .msg and .srv',
+          pdfPath: '02_ros2_telemetry/ros2_interfaces/out/deepdive_ros2_qos.pdf',
+          texPath: '02_ros2_telemetry/ros2_interfaces/src/deepdive_ros2_qos.tex',
         },
       ],
       sourceFiles: [
