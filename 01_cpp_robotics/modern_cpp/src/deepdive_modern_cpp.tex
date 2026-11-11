@@ -1,0 +1,140 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+\usepackage{minted}
+
+\title{UAV Software Engineering: C++ Fundamentals}
+\author{Topic 1.4: Modern C++ for Real-Time Robotics}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Value Categories and Move Semantics}
+In modern C++, understanding value categories (lvalues vs. rvalues) is crucial for performance. In robotics, transferring ownership of large objects---like a 640x480 \texttt{cv::Mat} frame or a dense point cloud---without copying the underlying memory buffer is vital for maintaining high frame rates.
+
+\textbf{Move Semantics (\texttt{std::move}):} \texttt{std::move} casts an object to an rvalue reference (\texttt{T\&\&}), signaling that its resources can be "stolen" by the recipient.
+\begin{itemize}
+    \item \textbf{When it saves a copy:} Passing a large, pre-allocated \texttt{std::vector} into a class constructor. By using \texttt{std::move}, the internal pointer is transferred in $O(1)$ time, avoiding an $O(N)$ deep copy.
+    \item \textbf{When it silently does nothing (or hurts):} Returning a local variable by value using \texttt{return std::move(local\_var);} is an anti-pattern. It disables the compiler's Return Value Optimization (RVO/NRVO), which would have eliminated the copy entirely by constructing the object directly in the caller's memory space.
+\end{itemize}
+
+\section{Modern Constructs (C++17 \& C++20)}
+Real-time loops benefit immensely from modern C++ features that enforce compile-time checks and eliminate runtime overhead.
+
+\subsection{Compile-time Evaluation (\texttt{constexpr})}
+Instead of computing trigonometric lookup tables (e.g., sine/cosine for drone kinematics) during node initialization, \texttt{constexpr} allows you to compute and store these tables in the binary at compile time, eliminating initialization latency.
+
+\subsection{Non-Owning Views (\texttt{std::span} and \texttt{std::string\_view})}
+Passing raw pointers and sizes into functions is a classic source of out-of-bounds Undefined Behavior (UB). \texttt{std::span<T>} (C++20) acts as a lightweight, non-owning view over a contiguous sequence of memory (like a \texttt{std::vector} or a raw C-array). It provides bounds checking and iterator support without allocating memory or copying data.
+
+\section{Lambdas and Capture Pitfalls}
+ROS 2 heavily utilizes lambdas for asynchronous callbacks (e.g., processing a LiDAR scan). A critical failure mode in UAV software is the \textbf{dangling reference} inside a lambda.
+
+\begin{itemize}
+    \item \textbf{The Dangling \texttt{this} Pointer:} If a node captures \texttt{[this]} in a timer callback, but the node instance is destroyed before the timer finishes firing, dereferencing \texttt{this} causes a segmentation fault. (In ROS 2, managing object lifecycles with \texttt{std::shared\_ptr} mitigates this).
+    \item \textbf{The Dangling Reference (\texttt{[\&]}):} Capturing local variables by reference and passing the lambda to a detached thread guarantees a crash. The thread will attempt to read memory that has already been popped off the stack.
+\end{itemize}
+
+\section{Time Management in Control Loops}
+A PID controller calculates the derivative term as $de / dt$. If $dt$ is negative or artificially stretched, the quadrotor will become unstable and crash.
+\begin{itemize}
+    \item \textbf{\texttt{std::chrono::system\_clock}:} Represents the wall-clock time. It is subject to NTP (Network Time Protocol) synchronization and daylight saving time adjustments. \textbf{Never use this for control loops}, as it can jump backwards.
+    \item \textbf{\texttt{std::chrono::steady\_clock}:} A monotonic clock that is guaranteed to never decrease. This is the only acceptable clock for measuring $dt$, loop sleep intervals (\texttt{std::this\_thread::sleep\_until}), and calculating velocities.
+\end{itemize}
+
+\section{Error Handling in Hot Paths}
+\textbf{Exceptions (\texttt{throw/catch}) are strictly forbidden in real-time hot paths.} Exception unwinding is non-deterministic and can cause execution stalls lasting milliseconds.
+
+Exceptions are only acceptable during initialization (e.g., failing to parse a configuration YAML or failing to open an I2C device node at startup). Inside the 400Hz flight loop, use modern alternative types:
+\begin{itemize}
+    \item \textbf{\texttt{std::optional<T>}:} Represents a value that may or may not exist (e.g., reading an I2C sensor where the bus might be busy, returning no data for one tick).
+    \item \textbf{\texttt{std::variant<T, ErrorCode>}:} A type-safe union. Combined with \texttt{std::visit}, it forces the programmer to explicitly handle both the success and the failure state at compile time.
+\end{itemize}
+
+\section{STL Cost Model and Memory Arenas}
+\subsection{Cache Locality and Contiguity}
+The CPU fetches memory in cache lines (typically 64 bytes). 
+\begin{itemize}
+    \item \textbf{\texttt{std::vector}, \texttt{std::array}:} Elements are strictly contiguous. The CPU hardware prefetcher predicts the access pattern, resulting in near-zero cache misses.
+    \item \textbf{\texttt{std::list}, \textbf{Maps/Sets}:} Node-based containers scatter data across the heap. Traversing them causes constant L1/L2 cache misses, resulting in massive latency spikes.
+\end{itemize}
+
+\subsection{Heap Allocation in Hot Loops}
+Calling \texttt{new}, \texttt{malloc}, or \texttt{push\_back} (when it triggers a capacity reallocation) requires an OS lock to find free heap space. \textbf{Rule of thumb:} Pre-allocate everything during node initialization. If dynamic sizing is strictly required, use \texttt{std::pmr} (Polymorphic Memory Resources) to assign a pre-allocated stack arena to your containers, ensuring $O(1)$ allocation without kernel involvement.
+
+\section{Atomics and the Memory Model}
+To safely pass data between a 1000Hz sensor reading thread and a 50Hz ROS 2 publishing thread without mutexes (which cause blocking and jitter), we use lock-free data structures built on \texttt{std::atomic}.
+
+\subsection{Basic Atomic Operations}
+Interacting with atomic variables should always be done explicitly using the base methods rather than overloaded assignment operators:
+\begin{itemize}
+    \item \textbf{\texttt{.load(std::memory\_order)}:} Used to safely \textbf{read} the value of an atomic variable.
+    \item \textbf{\texttt{.store(value, std::memory\_order)}:} Used to safely \textbf{write} a value to an atomic variable.
+\end{itemize}
+By explicitly passing a \texttt{memory\_order} parameter, you instruct the compiler and the CPU's instruction reorderer on exactly what level of synchronization is required, balancing safety and bare-metal performance.
+
+\subsection{The Acquire-Release Pattern}
+In a Single-Producer/Single-Consumer (SPSC) Ring Buffer, we must ensure that the producer's data is fully written to RAM before the consumer reads it. We enforce this through specific memory orders:
+\begin{itemize}
+    \item \textbf{\texttt{memory\_order\_relaxed}:} Offers no cross-thread synchronization. It simply guarantees that the read/write of this specific variable is atomic. \textit{When to use:} Use it when a thread is reading an atomic variable that it exclusively "owns" and modifies (e.g., the Producer reading its own \texttt{head\_} index, or the Consumer reading its own \texttt{tail\_} index).
+    \item \textbf{\texttt{memory\_order\_acquire}:} Used exclusively with \texttt{.load()}. It acts as a one-way synchronization gate. \textit{When to use:} The Consumer uses it when reading the Producer's \texttt{head\_} (or the Producer reading \texttt{tail\_}). It guarantees that no memory operations (like reading the payload from the buffer) can be reordered by the CPU \textit{before} this \texttt{.load()}. It ensures the thread safely "acquires" all memory updates published by the other thread.
+    \item \textbf{\texttt{memory\_order\_release}:} Used exclusively with \texttt{.store()}. It acts as the opposite one-way gate. \textit{When to use:} The Producer uses it when updating \texttt{head\_} to signal new data is ready (and the Consumer uses it when updating \texttt{tail\_} to free up space). It guarantees that all previous memory writes (i.e., writing the payload into the buffer array) are finished and visible in RAM \textit{before} the \texttt{.store()} executes. It safely "publishes" the data.
+\end{itemize}
+
+\section{Undefined Behavior (UB) and Sanitizers}
+Undefined Behavior means the C++ standard imposes no requirements on the compiler. It may format your hard drive or silently corrupt telemetry. 
+
+\textbf{Tooling:} Do not rely on code review alone to catch UB. Integrate these into your CMake/CI pipeline:
+\begin{itemize}
+    \item \textbf{ASan (AddressSanitizer):} Catches out-of-bounds array access, use-after-free, and memory leaks.
+    \item \textbf{UBSan (UndefinedBehaviorSanitizer):} Catches signed integer overflow, division by zero, and unaligned pointers.
+    \item \textbf{TSan (ThreadSanitizer):} Catches data races (reading and writing to the same memory concurrently without synchronization).
+\end{itemize}
+
+\textbf{SEI CERT C++ Rules (Example):}
+Rule EXP54-CPP: \textit{"Do not access an object outside of its lifetime."} Returning a reference to a local variable or capturing a temporary by reference in an asynchronous lambda directly violates this standard.
+
+\section{Benchmark: Lock-Free vs Mutex Queue}
+To empirically validate the advantages of a lock-free Single-Producer/Single-Consumer (SPSC) ring buffer over a traditional \texttt{std::mutex}-based queue, a stress test of 250,000 elements was performed on an Intel Core i5-9600K. The benchmark measures absolute throughput and 99th-percentile (p99) latency under two different compilation profiles.
+
+\subsection{Peak Performance (-O3 Optimization)}
+Compiled with maximum optimizations, the lock-free architecture demonstrates its superiority by eliminating OS context-switching and exploiting cache alignment (preventing false sharing).
+\begin{itemize}
+    \item \textbf{Lock-Free SPSC:} Throughput $\approx 29.68$ Million ops/sec | p99 Latency = $40.16\ \mu$s (40,162 ns)
+    \item \textbf{Mutex Queue:} Throughput $\approx 4.33$ Million ops/sec | p99 Latency = $268.77\ \mu$s (268,775 ns)
+\end{itemize}
+The lock-free queue is nearly 7 times faster in throughput and almost 7 times more stable in worst-case latency compared to the mutex baseline.
+
+\subsection{ThreadSanitizer (TSan) Overhead}
+When compiled with \texttt{-fsanitize=thread}, the compiler injects heavy instrumentation to track memory accesses and detect data races. While throughput collapses due to the diagnostic overhead, the lock-free implementation remains mathematically safe (no data races reported) and still outperforms the mutex version:
+\begin{itemize}
+    \item \textbf{Lock-Free SPSC (TSan):} Throughput $\approx 721$ Thousand ops/sec | p99 Latency = $1.48$ ms (1,485,364 ns)
+    \item \textbf{Mutex Queue (TSan):} Throughput $\approx 269$ Thousand ops/sec | p99 Latency = $5.90$ ms (5,900,952 ns)
+\end{itemize}
+This proves that the \texttt{std::memory\_order} constraints (acquire/release) were placed correctly, ensuring strict memory safety without sacrificing hard real-time performance.
+
+\section{Interview Questions}
+
+\begin{enumerate}
+    \item \textbf{Q: What is the difference between \texttt{std::unique\_ptr} and \texttt{std::shared\_ptr}?}\\
+    \textbf{A:} \texttt{unique\_ptr} expresses exclusive ownership and has zero overhead compared to a raw pointer. \texttt{shared\_ptr} expresses shared ownership and uses a heap-allocated control block for atomic reference counting, which introduces memory and performance overhead.
+
+    \item \textbf{Q: Why must a ROS 2 timer callback avoid executing long-blocking operations?}\\
+    \textbf{A:} If using a single-threaded executor, a blocking callback prevents all other callbacks in the queue (including critical telemetry and safety checks) from executing, leading to node starvation and potential failsafe triggers.
+
+    \item \textbf{Q: Explain why we use \texttt{std::chrono::steady\_clock} for PID timing.}\\
+    \textbf{A:} \texttt{steady\_clock} is monotonic and immune to system time adjustments (like NTP syncs). If \texttt{system\_clock} is adjusted backwards, $dt$ becomes negative, mathematically destabilizing the PID derivatives.
+
+    \item \textbf{Q: What is Perfect Forwarding?}\\
+    \textbf{A:} It is a template pattern using \texttt{T\&\&} (forwarding reference) and \texttt{std::forward<T>} to pass arguments to another function while perfectly preserving their value category (lvalue or rvalue) and \texttt{const} qualifiers.
+
+    \item \textbf{Q: You are writing a lock-free Single-Producer/Single-Consumer queue. Which memory ordering is required for the \texttt{push} and \texttt{pop} indices?}\\
+    \textbf{A:} The producer must use \texttt{memory\_order\_release} when updating the write index to ensure the data is visible. The consumer must use \texttt{memory\_order\_acquire} when reading the write index to safely access the newly written data without race conditions.
+\end{enumerate}
+
+
+
+\end{document}
