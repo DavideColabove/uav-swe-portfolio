@@ -26,9 +26,18 @@ jobs:
           sudo apt-get install --no-install-recommends -y \
             clang-format \
             clang-tidy \
+            python3-colcon-common-extensions \
             ros-humble-rclcpp \
             ros-humble-rclcpp-components \
-            ros-humble-sensor-msgs
+            ros-humble-sensor-msgs \
+            ros-humble-rosidl-default-generators \
+            ros-humble-std-msgs
+
+      - name: Build Custom ROS 2 Interfaces
+        run: |
+          . /opt/ros/humble/setup.sh
+          cd 02_ros2_telemetry/ros2_interfaces/uav_ws
+          colcon build --packages-select uav_interfaces
 
       - name: Enforce Code Style (clang-format)
         run: find . -name "*.cpp" -o -name "*.hpp" | xargs clang-format --dry-run -Werror
@@ -36,13 +45,14 @@ jobs:
       - name: Static Analysis (clang-tidy)
         run: |
           ROS_INCLUDES=$(find /opt/ros/humble/include -maxdepth 1 -type d | sed 's/^/-I/')
+          LOCAL_INCLUDES="-I$GITHUB_WORKSPACE/02_ros2_telemetry/ros2_interfaces/uav_ws/install/uav_interfaces/include/uav_interfaces"
           CPP_FILES=$(find 01_cpp_robotics 02_ros2_telemetry \
             -name "*.cpp" \
             -not -path "*/build/*" \
             -not -path "*/install/*" \
             -not -path "*/log/*")
           if [ -n "$CPP_FILES" ]; then
-            clang-tidy $CPP_FILES -- -std=c++17 ${ROS_INCLUDES}
+            clang-tidy $CPP_FILES -- -std=c++17 ${ROS_INCLUDES} ${LOCAL_INCLUDES}
           fi
 
   build-test:
