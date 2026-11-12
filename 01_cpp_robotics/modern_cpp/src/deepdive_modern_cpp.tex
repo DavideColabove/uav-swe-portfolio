@@ -98,10 +98,16 @@ Undefined Behavior means the C++ standard imposes no requirements on the compile
 Rule EXP54-CPP: \textit{"Do not access an object outside of its lifetime."} Returning a reference to a local variable or capturing a temporary by reference in an asynchronous lambda directly violates this standard.
 
 \section{Benchmark: Lock-Free vs Mutex Queue}
-To empirically validate the advantages of a lock-free Single-Producer/Single-Consumer (SPSC) ring buffer over a traditional \texttt{std::mutex}-based queue, a stress test of 250,000 elements was performed on an Intel Core i5-9600K. The benchmark measures absolute throughput and 99th-percentile (p99) latency under two different compilation profiles.
+To empirically validate the advantages of a lock-free Single-Producer/Single-Consumer (SPSC) ring buffer over a traditional \texttt{std::mutex}-based queue, a stress test of 250,000 elements was performed on an Intel Core i5-9600K. 
+
+\subsection{Compilation and Reproduction}
+The benchmark must be compiled with POSIX threads support and maximum compiler optimizations to prevent artificial overhead:
+\begin{verbatim}
+g++ -std=c++17 -Wall -Wextra -pthread -O3 bench_queue.cpp -o bench_perf
+\end{verbatim}
 
 \subsection{Peak Performance (-O3 Optimization)}
-Compiled with maximum optimizations, the lock-free architecture demonstrates its superiority by eliminating OS context-switching and exploiting cache alignment (preventing false sharing).
+Compiled with the command above, the lock-free architecture demonstrates its superiority by eliminating OS context-switching and exploiting cache alignment.
 \begin{itemize}
     \item \textbf{Lock-Free SPSC:} Throughput $\approx 29.68$ Million ops/sec | p99 Latency = $40.16\ \mu$s (40,162 ns)
     \item \textbf{Mutex Queue:} Throughput $\approx 4.33$ Million ops/sec | p99 Latency = $268.77\ \mu$s (268,775 ns)
@@ -116,6 +122,22 @@ When compiled with \texttt{-fsanitize=thread}, the compiler injects heavy instru
 \end{itemize}
 This proves that the \texttt{std::memory\_order} constraints (acquire/release) were placed correctly, ensuring strict memory safety without sacrificing hard real-time performance.
 
+\section{Timing Validation: OS Scheduler Jitter}
+To simulate a real-time flight control loop, a fixed-rate execution test was developed using \texttt{std::chrono::steady\_clock} and \texttt{std::this\_thread::sleep\_until}. The benchmark measures the scheduling jitter (the deviation between the requested wake-up time and the actual wake-up time) introduced by the standard Ubuntu 22.04 kernel (CFS).
+
+\subsection{Compilation}
+\begin{verbatim}
+g++ -std=c++17 -Wall -Wextra -pthread -O3 fixed_rate_loop.cpp -o fixed_rate_loop
+\end{verbatim}
+
+\subsection{Empirical Results (Idle CPU)}
+\begin{itemize}
+    \item \textbf{100 Hz Target (10 ms interval):} Avg Jitter $\approx 0.10$ ms | Max Overrun $\approx 0.20$ ms
+    \item \textbf{400 Hz Target (2.5 ms interval):} Avg Jitter $\approx 0.09$ ms | Max Overrun $\approx 0.23$ ms
+\end{itemize}
+
+\subsection{Architectural Implications}
+While an overrun of $\approx 230\ \mu$s is impressive for a general-purpose operating system, it is fundamentally inadequate for hard real-time robotics. At 400 Hz, a 0.23 ms scheduling delay consumes nearly 10\% of the available control window. Under heavy CPU load, generic OS schedulers can stall threads for multiple milliseconds, leading to catastrophic phase lag in PID controllers. This empirical evidence strictly mandates the adoption of a fully preemptive kernel (\texttt{PREEMPT\_RT}) for the flight controller deployment.
 \section{Interview Questions}
 
 \begin{enumerate}
