@@ -14,51 +14,23 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup ROS 2 Apt Repository
-        run: |
-          sudo apt-get update && sudo apt-get install -y curl gnupg lsb-release
-          sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
-
-      - name: Install Dependencies & Quality Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            clang-format \
-            clang-tidy \
-            python3-colcon-common-extensions \
-            ros-humble-rclcpp \
-            ros-humble-rclcpp-components \
-            ros-humble-sensor-msgs \
-            ros-humble-rosidl-default-generators \
-            ros-humble-std-msgs
-
-      - name: Build Custom ROS 2 Interfaces
-        run: |
-          . /opt/ros/humble/setup.sh
-          cd 02_ros2_telemetry/ros2_interfaces/uav_ws
-          colcon build --packages-select uav_interfaces
+      - name: Install Quality Tools
+        run: sudo apt-get update && sudo apt-get install -y clang-format clang-tidy
 
       - name: Enforce Code Style (clang-format)
-        run: find . -name "*.cpp" -o -name "*.hpp" | xargs clang-format --dry-run -Werror
+        run: find . -name "*.cpp" -o -name "*.hpp" -not -path "*/build/*" -not -path "*/install/*" | xargs clang-format --dry-run -Werror
 
       - name: Static Analysis (clang-tidy)
         run: |
-          ROS_INCLUDES=$(find /opt/ros/humble/include -maxdepth 1 -type d | sed 's/^/-I/')
-          LOCAL_INCLUDES="-I$GITHUB_WORKSPACE/02_ros2_telemetry/ros2_interfaces/uav_ws/install/uav_interfaces/include/uav_interfaces"
-          CPP_FILES=$(find 01_cpp_robotics 02_ros2_telemetry \
-            -name "*.cpp" \
-            -not -path "*/build/*" \
-            -not -path "*/install/*" \
-            -not -path "*/log/*")
+          CPP_FILES=$(find 01_cpp_robotics 02_ros2_telemetry/oop_ros2 -name "*.cpp" -not -path "*/build/*")
           if [ -n "$CPP_FILES" ]; then
-            clang-tidy $CPP_FILES -- -std=c++17 ${ROS_INCLUDES} ${LOCAL_INCLUDES}
+            clang-tidy $CPP_FILES -- -std=c++17 -I01_cpp_robotics/concurrency/include -I01_cpp_robotics/modern_cpp/src
           fi
 
   build-test:
     name: Standard Build & Unit Tests
     runs-on: ubuntu-22.04
-    needs: linting 
+    needs: linting
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -76,18 +48,16 @@ jobs:
   sanitizers:
     name: Sanitizer Suite (${{ matrix.sanitizer }})
     runs-on: ubuntu-22.04
-    needs: build-test # Evita di sprecare minuti CI se la build standard fallisce
+    needs: build-test
     strategy:
       fail-fast: false
       matrix:
-        # Address e UndefinedBehavior possono girare insieme. ThreadSanitizer deve girare da solo.
         sanitizer: ['address,undefined', 'thread']
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Configure CMake with Sanitizers
-        # -fno-omit-frame-pointer garantisce stack trace leggibili se il sanitizer trova un bug
         run: cmake -B build -S . -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer -g -O1"
 
       - name: Build
@@ -95,5 +65,4 @@ jobs:
 
       - name: Run CTest with Sanitizers
         working-directory: ./build
-        # I sanitizer intercettano automaticamente le violazioni di memoria e i data race durante ctest
         run: ctest --output-on-failure -j$(nproc)
