@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/dav/Desktop/uav-software-portfolio/concurrency/src/build/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

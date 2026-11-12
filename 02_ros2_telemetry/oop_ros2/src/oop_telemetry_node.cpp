@@ -1,14 +1,12 @@
-#include <iostream>
-#include <thread>
-#include <mutex>
 #include <condition_variable>
+#include <iostream>
+#include <mutex>
 #include <queue>
+#include <thread>
 
 class TelemetryNode {
 public:
-    TelemetryNode() {
-        std::cout << "Initialized TelemetryNode.\n";
-    }
+    TelemetryNode() { std::cout << "Initialized TelemetryNode.\n"; }
 
     TelemetryNode(const TelemetryNode&) = delete;
     TelemetryNode& operator=(const TelemetryNode&) = delete;
@@ -28,21 +26,19 @@ private:
     const float CONST_MULTIPLIER = 3.14;
 
     void sensorReader() {
-        for(int i = 0; i < 5; ++i)
-        {
+        for (int i = 0; i < 5; ++i) {
             {
-                std::lock_guard<std::mutex>lock(mtx_);
-                telemetry_queue_.push(CONST_MULTIPLIER *i);
+                std::lock_guard<std::mutex> lock(mtx_);
+                telemetry_queue_.push(CONST_MULTIPLIER * i);
             }
             cv_.notify_one();
         }
     }
 
     void flightController() {
-        for(int i = 0; i < 5; ++i)
-        {
+        for (int i = 0; i < 5; ++i) {
             std::unique_lock<std::mutex> lock(mtx_);
-            cv_.wait(lock,[this]{ return !telemetry_queue_.empty();});
+            cv_.wait(lock, [this] { return !telemetry_queue_.empty(); });
             std::cout << telemetry_queue_.front() << std::endl;
             telemetry_queue_.pop();
         }

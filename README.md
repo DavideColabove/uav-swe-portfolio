@@ -2,7 +2,7 @@
 
 [![Portfolio Website](https://img.shields.io/badge/Deep--Dive_Docs-Visit_Site-38bdf8?style=for-the-badge&logo=github)](https://davidecolabove.github.io/uav-swe-portfolio/)
 
-[![CMake Build](https://github.com/DavideColabove/uav-swe-portfolio/actions/workflows/build.yml/badge.svg)](https://github.com/DavideColabove/uav-swe-portfolio/actions/workflows/build.yml) [![Memory & Thread Safety](https://github.com/DavideColabove/uav-swe-portfolio/actions/workflows/sanitizers.yml/badge.svg)](https://github.com/DavideColabove/uav-swe-portfolio/actions/workflows/sanitizers.yml) 
+[![UAV CI Pipeline](https://github.com/DavideColabove/uav-swe-portfolio/actions/workflows/ci.yml/badge.svg)](https://github.com/DavideColabove/uav-swe-portfolio/actions/workflows/ci.yml)
 [![LaTeX Documentation](https://github.com/DavideColabove/uav-swe-portfolio/actions/workflows/latex.yml/badge.svg)](https://davidecolabove.github.io/uav-swe-portfolio/)
 
 
@@ -38,3 +38,19 @@ To ensure the reliability required for mission-critical UAV software, this repos
 * **Dynamic Memory & Thread Safety:** Automated runtime testing of all executable nodes instrumented with AddressSanitizer (ASan) and ThreadSanitizer (TSan). This guarantees zero memory leaks (via strict RAII) and prevents data races in highly concurrent publisher/subscriber environments.
 
 ## How to Build
+
+To configure and compile the entire project, run the following commands from the repository root:
+
+```bash
+cmake -B build -S .
+cmake --build build -j$(nproc)
+```
+
+## How to Run Tests
+
+This repository uses GoogleTest and CTest for automated unit testing and algorithmic validation. After building the project, you can execute the full test suite by running:
+
+```bash
+cd build
+ctest --output-on-failure
+```

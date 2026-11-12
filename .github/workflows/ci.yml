@@ -1,0 +1,66 @@
+name: UAV CI Pipeline
+
+on:
+  push:
+    branches: [ "main", "feature/*" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  linting:
+    name: Formatting & Static Analysis
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Quality Tools
+        run: sudo apt-get update && sudo apt-get install -y clang-format clang-tidy libgtest-dev
+
+      - name: Enforce Code Style (clang-format)
+        run: find . -name "*.cpp" -o -name "*.hpp" -not -path "*/build/*" -not -path "*/install/*" | xargs clang-format --dry-run -Werror
+
+      - name: Static Analysis (clang-tidy)
+        run: |
+          CPP_FILES=$(find 01_cpp_robotics/memory_management 01_cpp_robotics/concurrency -name "*.cpp" -not -path "*/build/*")
+          clang-tidy $CPP_FILES -- -std=c++17 -I01_cpp_robotics/concurrency/include
+
+  build-test:
+    name: Standard Build & Unit Tests
+    runs-on: ubuntu-22.04
+    needs: linting
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -B build -S .
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run CTest
+        working-directory: ./build
+        run: ctest --output-on-failure -j$(nproc)
+
+  sanitizers:
+    name: Sanitizer Suite (${{ matrix.sanitizer }})
+    runs-on: ubuntu-22.04
+    needs: build-test
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: ['address,undefined', 'thread']
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure CMake with Sanitizers
+        run: cmake -B build -S . -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer -g -O1"
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run CTest with Sanitizers
+        working-directory: ./build
+        run: ctest --output-on-failure -j$(nproc)

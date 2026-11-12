@@ -1,3 +1,0 @@
-/home/dav/Desktop/uav-software-portfolio/memory_management/src/build/CMakeFiles/smartptr.dir
-/home/dav/Desktop/uav-software-portfolio/memory_management/src/build/CMakeFiles/edit_cache.dir
-/home/dav/Desktop/uav-software-portfolio/memory_management/src/build/CMakeFiles/rebuild_cache.dir
