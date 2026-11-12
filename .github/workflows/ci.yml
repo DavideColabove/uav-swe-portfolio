@@ -14,7 +14,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup ROS 2 Humble
+      - name: Setup ROS 2
         uses: ros-tooling/setup-ros@v0.7
         with:
           required-ros-distributions: humble
@@ -22,22 +22,26 @@ jobs:
       - name: Install Dependencies & Quality Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-format clang-tidy ros-humble-rclcpp ros-humble-sensor-msgs
+          sudo apt-get install -y \
+            clang-format \
+            clang-tidy \
+            ros-humble-rclcpp \
+            ros-humble-rclcpp-components \
+            ros-humble-sensor-msgs
 
       - name: Enforce Code Style (clang-format)
         run: find . -name "*.cpp" -o -name "*.hpp" | xargs clang-format --dry-run -Werror
 
       - name: Static Analysis (clang-tidy)
         run: |
+          ROS_INCLUDES=$(find /opt/ros/humble/include -maxdepth 1 -type d | sed 's/^/-I/')
           find 01_cpp_robotics 02_ros2_telemetry \
             -name "*.cpp" \
             -not -path "*/build/*" \
             -not -path "*/install/*" \
             -not -path "*/log/*" | xargs clang-tidy -- \
             -std=c++17 \
-            -I/opt/ros/humble/include/rclcpp \
-            -I/opt/ros/humble/include/sensor_msgs \
-            -I/opt/ros/humble/include
+            ${ROS_INCLUDES}
 
   build-test:
     name: Standard Build & Unit Tests
