@@ -1,32 +1,32 @@
-#include<iostream>
-#include<thread>
-#include<mutex>
-#include<chrono>
+#include <chrono>
+#include <iostream>
+#include <mutex>
+#include <thread>
 
 std::mutex mtx;
 float drone_altitude = 0;
 
-void sensorReader(){
-    for(int i = 0; i < 5; ++i){
+void sensorReader() {
+    for (int i = 0; i < 5; ++i) {
         {
             std::lock_guard<std::mutex> lock(mtx);
-            drone_altitude += drone_altitude + i; 
+            drone_altitude += drone_altitude + i;
         }
         std::this_thread::sleep_for(std::chrono::microseconds(500));
     }
 }
 
-void flightController(){
-    for(int i = 0; i < 10; ++i){
+void flightController() {
+    for (int i = 0; i < 10; ++i) {
         {
             std::lock_guard<std::mutex> lock(mtx);
-            std::cout<< drone_altitude << "\n"; 
+            std::cout << drone_altitude << "\n";
         }
         std::this_thread::sleep_for(std::chrono::microseconds(500));
     }
 }
 
-int main(){
+int main() {
     std::thread t1(sensorReader);
     std::thread t2(flightController);
 

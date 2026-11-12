@@ -1,9 +1,9 @@
 #pragma once
-#include <queue>
-#include <mutex>
 #include <condition_variable>
-#include <optional>
 #include <cstddef>
+#include <mutex>
+#include <optional>
+#include <queue>
 
 template <typename T>
 class MutexQueue {
@@ -14,10 +14,10 @@ public:
     bool push(const T& item) {
         std::lock_guard<std::mutex> lock(mtx_);
         if (queue_.size() >= capacity_) {
-            return false; // Coda piena
+            return false;  // Coda piena
         }
         queue_.push(item);
-        cv_.notify_one(); // Notifica eventuali thread in attesa
+        cv_.notify_one();  // Notifica eventuali thread in attesa
         return true;
     }
 
@@ -25,7 +25,7 @@ public:
     std::optional<T> pop() {
         std::lock_guard<std::mutex> lock(mtx_);
         if (queue_.empty()) {
-            return std::nullopt; // Coda vuota
+            return std::nullopt;  // Coda vuota
         }
         T item = queue_.front();
         queue_.pop();
