@@ -1,5 +1,6 @@
 .vscode/
 */*/build/
+01_cpp_robotics/memory_management/out/build/
 */*/*/build/
 */*/*/install/
 */*/*/_minted/
