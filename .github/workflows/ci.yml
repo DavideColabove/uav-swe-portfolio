@@ -1,0 +1,68 @@
+name: UAV CI Pipeline
+
+on:
+  push:
+    branches: [ "main", "feature/*" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  linting:
+    name: Formatting & Static Analysis
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Quality Tools
+        run: sudo apt-get update && sudo apt-get install -y clang-format clang-tidy
+
+      - name: Enforce Code Style (clang-format)
+        # --dry-run -Werror blocca la build di GitHub se un file non rispetta il tuo .clang-format
+        run: find . -name "*.cpp" -o -name "*.hpp" | xargs clang-format --dry-run -Werror
+
+      - name: Static Analysis (clang-tidy)
+        run: find ch01_cpp -name "*.cpp" | xargs clang-tidy -- -std=c++17
+
+  build-test:
+    name: Standard Build & Unit Tests
+    runs-on: ubuntu-22.04
+    needs: linting # Esegue la build solo se il codice è formattato correttamente
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -B build -S .
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run CTest
+        working-directory: ./build
+        run: ctest --output-on-failure -j$(nproc)
+
+  sanitizers:
+    name: Sanitizer Suite (${{ matrix.sanitizer }})
+    runs-on: ubuntu-22.04
+    needs: build-test # Evita di sprecare minuti CI se la build standard fallisce
+    strategy:
+      fail-fast: false
+      matrix:
+        # Address e UndefinedBehavior possono girare insieme. ThreadSanitizer deve girare da solo.
+        sanitizer: ['address,undefined', 'thread']
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure CMake with Sanitizers
+        # -fno-omit-frame-pointer garantisce stack trace leggibili se il sanitizer trova un bug
+        run: cmake -B build -S . -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer -g -O1"
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run CTest with Sanitizers
+        working-directory: ./build
+        # I sanitizer intercettano automaticamente le violazioni di memoria e i data race durante ctest
+        run: ctest --output-on-failure -j$(nproc)
