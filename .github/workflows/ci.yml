@@ -22,7 +22,12 @@ jobs:
         run: find . -name "*.cpp" -o -name "*.hpp" | xargs clang-format --dry-run -Werror
 
       - name: Static Analysis (clang-tidy)
-        run: find ch01_cpp -name "*.cpp" | xargs clang-tidy -- -std=c++17
+        run: |
+          find 01_cpp_robotics 02_ros2_telemetry \
+            -name "*.cpp" \
+            -not -path "*/build/*" \
+            -not -path "*/install/*" \
+            -not -path "*/log/*" | xargs clang-tidy -- -std=c++17
 
   build-test:
     name: Standard Build & Unit Tests
