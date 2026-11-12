@@ -23,7 +23,7 @@ jobs:
 
       - name: Static Analysis (clang-tidy)
         run: |
-          find 01_cpp_robotics 02_ros2_telemetry \
+          find 01_cpp_robotics 02_ros2_telemetry 
             -name "*.cpp" \
             -not -path "*/build/*" \
             -not -path "*/install/*" \
