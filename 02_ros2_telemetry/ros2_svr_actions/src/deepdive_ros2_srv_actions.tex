@@ -1,0 +1,397 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+\usepackage{minted}
+\usepackage{booktabs}
+\usepackage{tabularx}
+
+\title{UAV Software Engineering: ROS 2 Architecture}
+\author{Services, Actions \& Parameters}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+While Publish/Subscribe (Topics) is the foundation of ROS 2, it is fundamentally designed for continuous, unidirectional data streams. UAV operations, however, require discrete commands, long-running mission tasks, and dynamic configuration. 
+
+Modeling every interaction in a flight stack as a topic quickly breaks down in practice. If a mission manager tries to command a drone to switch into \texttt{OFFBOARD} mode or climb to $10\text{ m}$ AGL (Above Ground Level) over a plain topic:
+\begin{itemize}
+    \item \textbf{No acknowledgement:} The publisher cannot verify whether the flight controller received the command, rejected it due to a failed pre-arm check, or crashed before processing it.
+    \item \textbf{No progress tracking:} A climb to $10\text{ m}$ at $1.5\text{ m/s}$ lasts several seconds; topics offer no built-in way to correlate continuous altitude feedback with a specific command instance.
+    \item \textbf{No cancellation semantics:} If an obstacle or battery warning appears mid-climb, there is no standardized handshake to preempt the maneuver and confirm a safe abort state.
+    \item \textbf{Hardcoded safety limits:} Operational ceilings (max altitude, max climb rate) vary by airspace, payload mass, and test site; recompiling binaries for every limit change slows field validation and breaks reproducibility.
+\end{itemize}
+
+This deep dive explores the three structural pillars of ROS 2 interactions beyond topics---Services, Actions, and Parameters---focusing on their DDS internals, executor semantics, C++17 design patterns, and real-world UAV failure modes.
+
+\section{Interaction Paradigms: Topic vs. Service vs. Action}
+Choosing the correct communication paradigm is a core architectural decision. Using a Service for a long-running task blocks the caller and prevents preemption, while using a Topic to trigger a critical state change lacks delivery confirmation and execution tracking.
+
+\begin{table}[h]
+\centering
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabularx}{\textwidth}{lXXX}
+\toprule
+\textbf{Feature} & \textbf{Topic} & \textbf{Service} & \textbf{Action} \\
+\midrule
+\textbf{Pattern} & Publish / Subscribe (many-to-many) & Request / Response (many clients, 1 server) & Goal / Feedback / Result / Cancel \\
+\textbf{Duration} & Continuous stream (unbounded) & Fast, discrete (microseconds to ms) & Long-running (seconds to minutes) \\
+\textbf{State} & Stateless data flow & Single transaction; no progress updates & Stateful (6-state goal machine) \\
+\textbf{Preemption} & N/A & Cannot be canceled once sent & First-class cancel and preemption \\
+\textbf{Default QoS} & Fully configurable (e.g., Best Effort) & Reliable, Volatile & Reliable handshakes; feedback topic \\
+\textbf{Main Pitfall} & Silent drop on QoS mismatch & Deadlock on blocking call in callback & Blocking inside \texttt{handle\_accepted} \\
+\textbf{UAV Example} & 200 Hz IMU, 10 Hz GPS, 50 Hz setpoints & \texttt{SetMode}, Arm/Disarm, geofence query & \texttt{ArmTakeoff} to 10 m, waypoint flight \\
+\bottomrule
+\end{tabularx}
+\caption{Decision matrix for ROS 2 communication paradigms in UAV flight software.}
+\end{table}
+
+\textbf{Architectural Rule of Thumb:} Use a \textbf{Topic} for periodic or multi-consumer telemetry; use a \textbf{Service} for instantaneous state queries or discrete transitions that do not wait on physical motion; use an \textbf{Action} whenever physical vehicle motion, progress feedback, or mid-execution cancellation is required.
+
+\section{Service Internals and the Classic Deadlock}
+A Service consists of two parts: a Request and a Response. Unlike ROS 1 (which opened point-to-point TCPROS sockets per call), ROS 2 services are built on top of DDS \textbf{RPC} (Remote Procedure Call) capabilities.
+
+\subsection{DDS-RPC Mechanics and Request Matching}
+When a node creates a service named \texttt{set\_mode} under namespace \texttt{/uav}, the RMW layer creates two hidden DDS topics underneath:
+\begin{itemize}
+    \item \texttt{rq/uav/set\_modeRequest} (Client writes, Server reads)
+    \item \texttt{rr/uav/set\_modeReply} (Server writes, Client reads)
+\end{itemize}
+Because multiple clients can call the same server concurrently, every request carries an \texttt{rmw\_request\_id\_t} header containing a 16-byte \textbf{Writer GUID} (identifying the exact client) and a monotonically increasing 64-bit \textbf{Sequence Number}. The server echoes this exact identifier in the reply envelope so the client middleware matches each response to the right pending \texttt{std::shared\_future}.
+
+Services default to \texttt{rmw\_qos\_profile\_services\_default} (\texttt{RELIABLE} reliability, \texttt{VOLATILE} durability). Because durability is volatile, a client should verify server availability with \texttt{wait\_for\_service(timeout)} or \texttt{service\_is\_ready()} before sending critical startup commands so requests are not lost during DDS discovery.
+
+\subsection{Synchronous vs. Asynchronous Clients}
+In \texttt{rclcpp}, service clients are natively asynchronous: \texttt{client->async\_send\_request(req)} sends the request over DDS and immediately returns a \texttt{SharedFuture}. The difference between synchronous and asynchronous usage depends on how your code consumes that future:
+\begin{itemize}
+    \item \textbf{Synchronous / Blocking pattern:} The calling thread blocks via \texttt{future.get()}, \texttt{future.wait\_for(...)}, or \texttt{rclcpp::\allowbreak spin\_until\_future\_complete(node, future)}. This is safe \textit{only} outside a spinning executor (e.g., inside \texttt{main()} during startup) or inside a dedicated thread / separate \texttt{CallbackGroup} on a \texttt{MultiThreadedExecutor}.
+    \item \textbf{Asynchronous / Callback pattern:} You pass a completion callback directly to \texttt{async\_send\_request(req, callback)}. The calling function returns immediately, keeping the executor free to process timers, telemetry, and the eventual service reply.
+\end{itemize}
+
+\subsection{The Single-Threaded Executor Deadlock}
+A classic pitfall in ROS 2 robotics occurs when an engineer calls a synchronous service \textit{inside} a topic or timer callback while using a \texttt{SingleThreadedExecutor}.
+
+\begin{verbatim}
+ SingleThreadedExecutor (1 Thread)               DDS Network / Service Server
+ =================================               ============================
+  |
+  | 1. Invokes timer / subscription callback
+  v
+ [Inside Callback]
+  |-- 2. async_send_request(req) --------------> [Receives Request]
+  |                                                     |
+  |-- 3. Blocks on future.get()                         | 4. Sends Reply
+  |      (Thread is now FROZEN!)  <---------------------'
+  |                                 [Reply sits unread in DDS buffer]
+  | 5. Thread cannot return to
+  |    executor spin loop!
+  X  ===> PERMANENT DEADLOCK (Watchdogs & telemetry also stall)
+\end{verbatim}
+
+\textbf{The Mechanism of Failure:}
+\begin{enumerate}
+    \item The Executor receives a message on a topic (or a timer tick) and triggers the callback.
+    \item Inside the callback, the node sends a service request (e.g., calling \texttt{SetMode} to enter \texttt{RTL} because battery dropped).
+    \item The callback calls \texttt{future.get()} (or \texttt{spin\_until\_future\_complete}), blocking the thread until the response arrives.
+    \item Because the \texttt{SingleThreadedExecutor} has only \textbf{one thread}, and that thread is frozen inside the callback, the Executor cannot spin its wait-set to read incoming DDS traffic.
+    \item The service reply arrives in the OS/DDS socket buffer, but is never dispatched. The node deadlocks indefinitely, also starving every safety timer.
+\end{enumerate}
+
+\textbf{Production Fixes:} Prefer the non-blocking callback overload of \texttt{async\_send\_request} (zero extra threads). If blocking semantics are strictly required, switch to a \texttt{MultiThreadedExecutor} and assign the calling callback and the service client to \textbf{separate} \texttt{CallbackGroup}s so a second thread can process the reply.
+
+\begin{minted}[breaklines, fontsize=\small]{cpp}
+// [BROKEN] Deadlocks on SingleThreadedExecutor:
+void broken_timer_cb() {
+    auto req = std::make_shared<SetMode::Request>();
+    req->target_mode = SetMode::Request::MODE_OFFBOARD;
+    auto future = mode_client_->async_send_request(req);
+    auto resp = future.get();  // DEADLOCK: blocks the only executor thread!
+}
+
+// [FIXED] Non-blocking asynchronous callback:
+void safe_timer_cb() {
+    if (!mode_client_->service_is_ready()) { return; }
+    auto req = std::make_shared<SetMode::Request>();
+    req->target_mode = SetMode::Request::MODE_OFFBOARD;
+    mode_client_->async_send_request(
+        req,
+        [this](rclcpp::Client<SetMode>::SharedFuture future) {
+            const auto resp = future.get();  // Safe: future is already fulfilled
+            RCLCPP_INFO(get_logger(), "Mode switch: %s (%s)",
+                        resp->success ? "OK" : "FAIL", resp->message.c_str());
+        });
+}
+\end{minted}
+
+\section{Action Internals and the Goal State Machine}
+Actions are designed for preemptable, long-running tasks. Under the hood, an Action is not a single DDS entity; \texttt{rclcpp\_action} composes \textbf{three hidden Services and two hidden Topics} under the \texttt{/\_action/*} namespace:
+\begin{itemize}
+    \item \textbf{Goal Service (\texttt{send\_goal}):} Client sends the goal with a unique 128-bit UUID; Server accepts or rejects it.
+    \item \textbf{Result Service (\texttt{get\_result}):} Client requests the final outcome; Server replies once the goal reaches a terminal state.
+    \item \textbf{Cancel Service (\texttt{cancel\_goal}):} Client requests to cancel one or more active goals by UUID or timestamp.
+    \item \textbf{Feedback Topic (\texttt{feedback}):} Server publishes continuous progress updates (e.g., current altitude at $5\text{ Hz}$ during takeoff).
+    \item \textbf{Status Topic (\texttt{status}):} Server publishes a \texttt{GoalStatusArray} with \texttt{TRANSIENT\_LOCAL} durability so late-joining monitors immediately learn the state of active goals.
+\end{itemize}
+
+\begin{verbatim}
+ +-----------------+                                     +-----------------+
+ |  Action Client  |                                     |  Action Server  |
+ +-----------------+                                     +-----------------+
+    |--- [SRV] /arm_takeoff/_action/send_goal   (UUID) ----->| (Accept/Reject)
+    |<-- [SRV] /arm_takeoff/_action/send_goal   (accepted) --|
+    |--- [SRV] /arm_takeoff/_action/get_result  (UUID) ----->| (Waits)
+    |<== [TOP] /arm_takeoff/_action/feedback    (5 Hz) ======|
+    |<== [TOP] /arm_takeoff/_action/status      (state) =====|
+    |--- [SRV] /arm_takeoff/_action/cancel_goal (UUID) ----->| (Optional)
+    |<-- [SRV] /arm_takeoff/_action/cancel_goal (response) --|
+    |<-- [SRV] /arm_takeoff/_action/get_result  (Result) ----|
+\end{verbatim}
+
+\subsection{The Goal State Machine}
+When an Action Server accepts a goal, it creates a \texttt{ServerGoalHandle} (paired with a \texttt{ClientGoalHandle} on the caller side). This handle enforces a strict 6-state lifecycle:
+
+\begin{verbatim}
+                    [Goal Rejected] (No GoalHandle)
+                          ^
+                          | reject
+  (send_goal) ----> [ ACCEPTED ] -------------------+
+                          |                         | cancel_goal
+                  execute |                         v
+                          v                  [ CANCELING ] ----+
+                   [ EXECUTING ] ------------------>|          |
+                     |        |     cancel_goal     |          |
+             succeed |        | abort        abort  |  cancel  |
+                     v        v                     v          v
+              [ SUCCEEDED ] [ ABORTED ] <-----------+   [ CANCELED ]
+                 (terminal)   (terminal)                  (terminal)
+\end{verbatim}
+
+Distinguishing the three terminal states is crucial for autonomous mission logic:
+\begin{itemize}
+    \item \textbf{\texttt{SUCCEEDED}:} The drone reached the requested target altitude within tolerance.
+    \item \textbf{\texttt{CANCELED}:} An external client (or safety supervisor) explicitly requested cancellation via \texttt{cancel\_goal}, and the server halted the maneuver cleanly via \texttt{goal\_handle->canceled(result)}.
+    \item \textbf{\texttt{ABORTED}:} The server itself detected an internal or environmental fault (e.g., GPS loss, estimator unhealthy, timeout) and terminated execution via \texttt{goal\_handle->abort(result)}.
+\end{itemize}
+
+\subsection{Server Callbacks, Preemption, and Non-Blocking Execution}
+An \texttt{rclcpp\_action::Server} registers three callbacks:
+\begin{enumerate}
+    \item \textbf{\texttt{handle\_goal(uuid, goal)}:} Validates bounds against live parameters (e.g., rejecting \texttt{target\_altitude\_m > max\_altitude\_m}) and returns \texttt{REJECT}, \texttt{ACCEPT\_AND\_EXECUTE}, or \texttt{ACCEPT\_AND\_DEFER}.
+    \item \textbf{\texttt{handle\_cancel(goal\_handle)}:} Decides whether cancellation is allowed (\texttt{CancelResponse::ACCEPT} or \texttt{REJECT}, e.g., rejecting cancel during the final $0.3\text{ m}$ touchdown). Accepting sets \texttt{goal\_handle->is\_canceling() == true} but does \textit{not} kill execution automatically; your control loop must poll \texttt{is\_canceling()} and transition to \texttt{canceled(result)}.
+    \item \textbf{\texttt{handle\_accepted(goal\_handle)}:} \textbf{Must return immediately.} Running a blocking \texttt{while} loop inside \texttt{handle\_accepted} freezes the executor so cancel requests and parameter updates cannot be delivered.
+\end{enumerate}
+
+\textbf{Preemption Policies:} Because a physical UAV has a single set of actuators, when a new goal arrives while \texttt{active\_goal\_} is executing, the server must enforce either a \textit{reject-while-busy} policy (safe for arming/takeoff) or a \textit{preempt-active} policy (cleanly aborting/canceling the previous \texttt{GoalHandle} before switching to a new waypoint or emergency RTL).
+
+\textbf{Timer-Driven Execution vs. Detached Threads:} Rather than spawning unsafe detached threads (\texttt{std::thread\{...\}.detach()}, which risk dangling \texttt{this} pointers on shutdown), flight-grade ROS 2 servers store \texttt{active\_goal\_} as a member and advance the simulated climb inside a fixed-rate \texttt{rclcpp::TimerBase} (e.g., $5\text{ Hz}$ / $200\text{ ms}$):
+
+\begin{minted}[breaklines, fontsize=\small]{cpp}
+void on_control_timer() {
+    if (!active_goal_) { return; }
+
+    auto result = std::make_shared<ArmTakeoff::Result>();
+    if (active_goal_->is_canceling()) {
+        result->success = false;
+        result->final_altitude_m = current_altitude_m_;
+        result->reason = "Takeoff canceled by client";
+        active_goal_->canceled(result);
+        active_goal_.reset();
+        return;
+    }
+
+    const float target = active_goal_->get_goal()->target_altitude_m;
+    current_altitude_m_ = std::min(
+        target, current_altitude_m_ + static_cast<float>(max_climb_rate_mps_ * 0.2));
+
+    auto feedback = std::make_shared<ArmTakeoff::Feedback>();
+    feedback->current_altitude_m = current_altitude_m_;
+    feedback->state = (current_altitude_m_ < target) ? "CLIMBING" : "STABILIZING";
+    active_goal_->publish_feedback(feedback);
+
+    if (current_altitude_m_ >= target - 1e-3f) {
+        result->success = true;
+        result->final_altitude_m = current_altitude_m_;
+        result->reason = "Target altitude reached";
+        active_goal_->succeed(result);
+        active_goal_.reset();
+    }
+}
+\end{minted}
+
+\section{Parameters and Dynamic Reconfiguration}
+Unlike ROS 1's centralized Parameter Server inside \texttt{roscore}, ROS 2 Parameters are strictly \textbf{node-scoped}. Every \texttt{rclcpp::Node} owns its parameters and automatically exposes standard parameter services (\texttt{get\_parameters}, \texttt{set\_parameters}, \texttt{describe\_parameters}) while publishing changes to \texttt{/parameter\_events}.
+
+\subsection{Declaration and Validation}
+In C++, parameters must be explicitly declared before they are read (avoid enabling \texttt{automatically\_declare\_\allowbreak parameters\_from\_overrides}, as typos in YAML files silently create unused parameters). Robust UAV nodes combine two mechanisms:
+\begin{itemize}
+    \item \textbf{Parameter Descriptors (\texttt{ParameterDescriptor}):} Attach human-readable descriptions, \texttt{read\_only} flags (for hardware constants locked after boot), and numeric bounds via \texttt{FloatingPointRange} or \texttt{IntegerRange}.
+    \item \textbf{Atomic Validation Callbacks (\texttt{add\_on\_set\_\allowbreak parameters\_callback}):} Intercept every runtime update \textit{before} it is committed. Because \texttt{set\_parameters\_atomically} can modify multiple parameters in a single transaction, validate \textit{all} entries in the incoming vector first and mutate live member variables only after every constraint passes.
+\end{itemize}
+
+\begin{minted}[breaklines, fontsize=\small]{cpp}
+rcl_interfaces::msg::ParameterDescriptor alt_desc;
+alt_desc.description = "Maximum permitted takeoff altitude AGL [m]";
+rcl_interfaces::msg::FloatingPointRange alt_range;
+alt_range.from_value = 1.0;
+alt_range.to_value = 120.0;  // EU Open Category ceiling
+alt_desc.floating_point_range.push_back(alt_range);
+
+max_altitude_m_ = declare_parameter<double>("max_altitude_m", 30.0, alt_desc);
+max_climb_rate_mps_ = declare_parameter<double>("max_climb_rate_mps", 2.0);
+
+// Store handle as member variable; discarding it unregisters the callback!
+param_cb_handle_ = add_on_set_parameters_callback(
+    [this](const std::vector<rclcpp::Parameter> & params) {
+        rcl_interfaces::msg::SetParametersResult res;
+        res.successful = true;
+        double next_alt = max_altitude_m_;
+        double next_rate = max_climb_rate_mps_;
+
+        for (const auto & p : params) {
+            if (p.get_name() == "max_altitude_m") {
+                if (p.as_double() < 1.0 || p.as_double() > 120.0) {
+                    res.successful = false;
+                    res.reason = "max_altitude_m must be within [1.0, 120.0] m";
+                    return res;
+                }
+                next_alt = p.as_double();
+            } else if (p.get_name() == "max_climb_rate_mps") {
+                if (p.as_double() <= 0.1 || p.as_double() > 5.0) {
+                    res.successful = false;
+                    res.reason = "max_climb_rate_mps must be within (0.1, 5.0] m/s";
+                    return res;
+                }
+                next_rate = p.as_double();
+            }
+        }
+        max_altitude_m_ = next_alt;
+        max_climb_rate_mps_ = next_rate;
+        return res;
+    });
+\end{minted}
+
+\subsection{YAML Deployment and Runtime Inspection}
+Operational parameters are version-controlled in YAML files and loaded at launch time (using the node's fully qualified name or the \texttt{/**} wildcard):
+
+\begin{minted}[breaklines, fontsize=\small]{yaml}
+/drone_1/mission_action_server:
+  ros__parameters:
+    max_altitude_m: 30.0
+    max_climb_rate_mps: 2.5
+\end{minted}
+
+At runtime, engineers inspect, modify, and snapshot parameters via \texttt{ros2 param}:
+\begin{minted}[breaklines, fontsize=\small]{bash}
+ros2 run uav_mission mission_action_server --ros-args --params-file mission_params.yaml
+ros2 param list /drone_1/mission_action_server
+ros2 param describe /drone_1/mission_action_server max_altitude_m
+ros2 param set /drone_1/mission_action_server max_altitude_m 45.0
+ros2 param dump /drone_1/mission_action_server > flight_params_snapshot.yaml
+\end{minted}
+
+\section{Namespaces, Remapping, and Interface Design}
+
+\subsection{Namespaces and Remapping}
+To operate a multi-drone fleet or multi-instance SITL simulation without topic collisions, ROS 2 resolves resource names according to three rules when a node runs under a namespace (e.g., \texttt{-r \_\_ns:=/drone\_1}):
+\begin{itemize}
+    \item \textbf{Relative name (\texttt{arm\_takeoff}):} Prepends the node's namespace $\rightarrow$ \texttt{/drone\_1/arm\_takeoff}. Always use relative names by default so nodes remain portable across fleets.
+    \item \textbf{Private name (\texttt{\textasciitilde{}/status}):} Prepends namespace and node name $\rightarrow$ \texttt{/drone\_1/mission\_server/status}. Suitable for node-specific diagnostics.
+    \item \textbf{Global name (\texttt{/emergency\_stop}):} Ignores the namespace completely. Reserve strictly for fleet-wide signals; leading slashes break multi-drone isolation.
+\end{itemize}
+
+\textbf{Remapping} rewires topic, service, and action names at runtime without recompiling C++ code:
+\begin{minted}[breaklines, fontsize=\small]{bash}
+ros2 run uav_mission mission_action_server --ros-args \
+  -r __ns:=/drone_1 \
+  -r set_mode:=flight_controller/set_mode
+\end{minted}
+
+\subsection{Interface Design Guidelines}
+Custom \texttt{.srv} and \texttt{.action} files form long-lived contracts between packages and recorded rosbags. Following REP-103 and industrial robotics conventions:
+\begin{itemize}
+    \item \textbf{Strict SI Units and Suffixes:} Always use standard SI units and encode them directly in field names (e.g., \texttt{float32 target\_altitude\_m}, \texttt{float32 max\_climb\_rate\_mps}, \texttt{float32 timeout\_s}) rather than ambiguous names like \texttt{altitude}.
+    \item \textbf{Explicit Reference Frames:} Include \texttt{std\_msgs/Header} (with \texttt{stamp} and \texttt{frame\_id}) for geometric data, or explicitly document the frame in comments and field names (e.g., AGL vs. AMSL, local ENU vs. NED).
+    \item \textbf{Actionable Diagnostics:} Pair \texttt{bool success} with explicit enum constants and a human-readable \texttt{string reason} so both finite state machines and operators can diagnose rejections.
+\end{itemize}
+
+Concrete interface definitions for this module (\texttt{ArmTakeoff.action} and \texttt{SetMode.srv}):
+
+\begin{minted}[breaklines, fontsize=\small]{text}
+# action/ArmTakeoff.action (altitude relative to home ground level, AGL)
+float32 target_altitude_m    # Goal: valid range (0.0, max_altitude_m]
+---
+bool success                 # Result: terminal outcome
+float32 final_altitude_m
+string reason                # e.g., "Target altitude reached" / "Canceled"
+---
+float32 current_altitude_m   # Feedback: published at 5 Hz during climb
+string state                 # "ARMING", "CLIMBING", "STABILIZING"
+\end{minted}
+
+\begin{minted}[breaklines, fontsize=\small]{text}
+# srv/SetMode.srv
+uint8 MODE_IDLE     = 0
+uint8 MODE_HOLD     = 1
+uint8 MODE_OFFBOARD = 2
+uint8 MODE_RTL      = 3
+
+uint8 target_mode
+---
+bool success
+uint8 active_mode
+string message
+\end{minted}
+
+\subsection{Common Production Pitfalls}
+\begin{enumerate}
+    \item \textbf{Discarding \texttt{OnSetParametersCallbackHandle}:} \texttt{add\_on\_set\_\allowbreak parameters\_callback()} returns a \texttt{SharedPtr}. If not stored in a class member, RAII immediately destroys it and silently disables all parameter safety checks.
+    \item \textbf{Blocking in \texttt{handle\_accepted}:} Running a sleep loop inside \texttt{handle\_accepted} prevents the executor from delivering \texttt{handle\_cancel}, breaking preemption.
+    \item \textbf{Ignoring \texttt{is\_canceling()}:} Accepting a cancel request in \texttt{handle\_cancel} only sets a flag; your execution loop must check \texttt{is\_canceling()} and call \texttt{canceled(result)}.
+    \item \textbf{Leaking pending service requests:} Calling \texttt{async\_send\_request} repeatedly while a server is offline without checking \texttt{service\_is\_ready()} or calling \texttt{prune\_pending\_requests()} causes unbounded memory growth.
+    \item \textbf{Hardcoding global names (\texttt{/set\_mode}):} Prevents running multiple simulated drones under distinct namespaces.
+\end{enumerate}
+
+\section{Interview Questions}
+\begin{enumerate}
+    \item \textbf{Q: When would you use a Service instead of an Action for a drone?} \\
+    \textbf{A:} Services are for fast, non-preemptable operations that complete in milliseconds without waiting on physical motion, such as switching a mode flag or querying a geofence. Actions are for multi-second physical maneuvers that require progress feedback and mid-flight cancellation, like takeoff or flying to a waypoint.
+
+    \item \textbf{Q: Explain the single-threaded executor deadlock and two ways to fix it.} \\
+    \textbf{A:} Calling \texttt{future.get()} on a service request inside a topic or timer callback blocks the executor's only thread. Because that same thread must spin the DDS wait-set to read the incoming service reply, the reply is never processed and the node freezes permanently. Fix 1 (preferred): pass a completion callback to \texttt{async\_send\_request()} so the calling callback returns immediately. Fix 2: use a \texttt{MultiThreadedExecutor} with separate \texttt{CallbackGroup}s for the caller and the service client.
+
+    \item \textbf{Q: What DDS entities are created under the hood for a ROS 2 Action?} \\
+    \textbf{A:} Three Services (\texttt{send\_goal}, \texttt{get\_result}, \texttt{cancel\_goal}) for reliable UUID-correlated handshakes, and two Topics (\texttt{feedback} for progress updates and \texttt{status} with \texttt{TRANSIENT\_LOCAL} durability for goal state visibility).
+
+    \item \textbf{Q: What is the difference between \texttt{CANCELED} and \texttt{ABORTED} in the Action Goal State Machine?} \\
+    \textbf{A:} \texttt{CANCELED} means an external client explicitly requested cancellation via \texttt{cancel\_goal} and the server completed it cleanly. \texttt{ABORTED} means the server terminated the goal on its own due to an internal fault or safety condition (e.g., GPS loss or timeout).
+
+    \item \textbf{Q: What is a \texttt{GoalHandle} and why must \texttt{handle\_accepted} return quickly?} \\
+    \textbf{A:} A \texttt{GoalHandle} tracks and transitions a specific goal's state (\texttt{publish\_feedback}, \texttt{is\_canceling}, \texttt{succeed}, \texttt{canceled}, \texttt{abort}). \texttt{handle\_accepted} runs on the executor thread; blocking inside it starves cancel requests and telemetry. Storing the handle and advancing work in a fixed-rate timer avoids both blocking and unsafe detached threads.
+
+    \item \textbf{Q: How do you prevent an operator from setting a negative climb rate or unsafe altitude at runtime?} \\
+    \textbf{A:} Declare the parameter with a \texttt{ParameterDescriptor} (\texttt{FloatingPointRange}) and register an \texttt{add\_on\_set\_\allowbreak parameters\_callback}, storing the returned handle as a member. Validate all parameters in the incoming batch first and return \texttt{successful = false} with a reason before modifying any live member state.
+
+    \item \textbf{Q: What happens if you ignore the return value of \texttt{add\_on\_set\_\allowbreak parameters\_callback}?} \\
+    \textbf{A:} The returned \texttt{OnSetParametersCallbackHandle::SharedPtr} is destroyed immediately at the semicolon, unregistering the callback via RAII and silently bypassing all future parameter validation.
+
+    \item \textbf{Q: Why is remapping useful, and why should node code avoid leading slashes in resource names?} \\
+    \textbf{A:} Remapping lets you reuse the exact same compiled binary across different vehicles or test setups by rewiring names at launch time. Avoiding leading slashes (using relative names like \texttt{arm\_takeoff} instead of \texttt{/arm\_takeoff}) allows namespaces (\texttt{/drone\_1}, \texttt{/drone\_2}) to isolate multi-drone fleets automatically.
+\end{enumerate}
+
+\section{References}
+\begin{enumerate}
+    \item Open Robotics, \textit{Understanding ROS 2 Services}: 
+    \newline \texttt{https://docs.ros.org/en/jazzy/Tutorials/Services/Understanding-ROS2-Services.html}
+    \item Open Robotics, \textit{Synchronous vs. Asynchronous Service Clients}: 
+    \newline \texttt{https://docs.ros.org/en/lyrical/How-To-Guides/Sync-Vs-Async.html}
+    \item Open Robotics, \textit{REP 103: Standard Units of Measure and Coordinate Conventions}: 
+    \newline \texttt{https://reps.openrobotics.org/rep-0103/}
+    \item ROS Discourse, \textit{Synchronous request to service in callback results in deadlock}: 
+    \newline \texttt{https://discourse.openrobotics.org/t/synchronous-request-to-service-in-callback-results-in-deadlock/12767}
+\end{enumerate}
+
+\end{document}
